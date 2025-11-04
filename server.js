@@ -17,8 +17,8 @@ app.use((req, res, next) => {
 
 // MODIFIÉ : Configuration CORS
 const whitelist = [
-    'https://https://lcssrd.github.io', // L'URL de votre GitHub Pages
-    'http://localhost:5500', // Si vous testez encore en local (gardez http ou https)
+    'https://lcssrd.github.io', // <--- C'EST LA LIGNE CORRIGÉE
+    'http://localhost:5500',
     'http://127.0.0.1:5500'
 ];
 const corsOptions = {
@@ -26,6 +26,7 @@ const corsOptions = {
         if (whitelist.indexOf(origin) !== -1 || !origin) {
             callback(null, true);
         } else {
+            console.error(`CORS Rejeté : Origine ${origin} non autorisée.`); // Ajout d'un log d'erreur
             callback(new Error('Non autorisé par CORS'));
         }
     }
@@ -627,4 +628,5 @@ mongoose.connect(MONGO_URI)
         process.exit(1);
 
     });
+
 
