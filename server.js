@@ -9,6 +9,12 @@ const jwt = require('jsonwebtoken');
 
 // --- CONFIGURATION ---
 const app = express();
+
+app.use((req, res, next) => {
+    console.log(`REQ ORIGIN: ${req.headers.origin}`);
+    next();
+});
+
 // MODIFIÉ : Configuration CORS
 const whitelist = [
     'https://https://lcssrd.github.io', // L'URL de votre GitHub Pages
@@ -621,3 +627,4 @@ mongoose.connect(MONGO_URI)
         process.exit(1);
 
     });
+
