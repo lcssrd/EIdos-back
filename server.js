@@ -11,7 +11,7 @@ const jwt = require('jsonwebtoken');
 const app = express();
 // MODIFIÉ : Configuration CORS
 const whitelist = [
-    'https://VOTRE-NOM-GITHUB.github.io', // L'URL de votre GitHub Pages
+    'https://https://lcssrd.github.io', // L'URL de votre GitHub Pages
     'http://localhost:5500', // Si vous testez encore en local (gardez http ou https)
     'http://127.0.0.1:5500'
 ];
@@ -619,4 +619,5 @@ mongoose.connect(MONGO_URI)
     .catch((err) => {
         console.error('❌ Erreur de connexion à MongoDB :', err);
         process.exit(1);
+
     });
