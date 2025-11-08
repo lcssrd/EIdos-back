@@ -3,16 +3,14 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const path = require('path'); // AJOUTÉ : Pour gérer les chemins de fichiers
+// const path = require('path'); // SUPPRIMÉ
 
 // --- CONFIGURATION ---
 const app = express();
 app.use(cors()); 
 app.use(express.json());
 
-// AJOUTÉ : Servir les fichiers statiques (HTML, CSS, JS) depuis le répertoire racine
-// __dirname est le dossier où s'exécute server.js
-app.use(express.static(path.join(__dirname)));
+// SUPPRIMÉ : Le app.use(express.static(...)) a été retiré
 
 // MODIFIÉ : Utiliser le port de Render, ou 3000 par défaut
 const PORT = process.env.PORT || 3000;
@@ -713,12 +711,7 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
-// AJOUTÉ : Route "Catch-all" pour servir index.html
-// Doit être APRÈS les routes API et AVANT le démarrage du serveur
-app.get('/*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
-
+// SUPPRIMÉ : La route "Catch-all" app.get('/*') a été retirée
 
 // --- DÉMARRAGE DU SERVEUR ---
 mongoose.connect(MONGO_URI)
