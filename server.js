@@ -1,61 +1,49 @@
-// server.js (Modifié)
-
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-// const nodemailer = require('nodemailer'); // Nécessaire pour un VRAI envoi d'email
+const path = require('path'); // AJOUTÉ : Pour gérer les chemins de fichiers
 
 // --- CONFIGURATION ---
 const app = express();
-
-app.use((req, res, next) => {
-    console.log(`REQ ORIGIN: ${req.headers.origin}`);
-    next();
-});
-
-// MODIFIÉ : Configuration CORS
-const whitelist = [
-    'https://lcssrd.github.io', // <--- C'EST LA LIGNE CORRIGÉE
-    'http://localhost:5500',
-    'http://127.0.0.1:5500'
-];
-const corsOptions = {
-    origin: function (origin, callback) {
-        if (whitelist.indexOf(origin) !== -1 || !origin) {
-            callback(null, true);
-        } else {
-            console.error(`CORS Rejeté : Origine ${origin} non autorisée.`); // Ajout d'un log d'erreur
-            callback(new Error('Non autorisé par CORS'));
-        }
-    }
-};
-app.use(cors(corsOptions));
-// FIN DE LA MODIFICATION
+app.use(cors()); 
 app.use(express.json());
 
-const PORT = 3000;
+// AJOUTÉ : Servir les fichiers statiques (HTML, CSS, JS) depuis le répertoire racine
+// __dirname est le dossier où s'exécute server.js
+app.use(express.static(path.join(__dirname)));
+
+// MODIFIÉ : Utiliser le port de Render, ou 3000 par défaut
+const PORT = process.env.PORT || 3000;
 const MONGO_URI = "mongodb+srv://lucasseraudie_db_user:9AnBALAG30WhZ3Ce@eidos.lelleaw.mongodb.net/?appName=EIdos";
 const JWT_SECRET = "mettez_une_phrase_secrete_tres_longue_ici";
 
 // --- MODÈLES DE DONNÉES (SCHEMAS) ---
 
-// --- MODIFIÉ : Schéma Utilisateur (retour au hachage pour tous) ---
+// --- MODIFIÉ : Schéma Utilisateur (Ajout du statut 'student') ---
 const userSchema = new mongoose.Schema({
-    email: { type: String, unique: true, lowercase: true, sparse: true },
+    email: { type: String, unique: true, lowercase: true, sparse: true }, // Pour les formateurs
+    login: { type: String, unique: true, lowercase: true, sparse: true }, // Pour les étudiants
+
+    passwordHash: { type: String, required: true },
     isVerified: { type: Boolean, default: false },
     confirmationCode: { type: String },
-    subscription: { type: String, enum: ['solo', 'pro', 'organisation'], default: 'solo' },
+    
+    // Rôle simplifié
+    role: { type: String, enum: ['formateur', 'etudiant'], required: true },
+    
+    // Nouveaux plans (avec 'student' ajouté)
+    subscription: { type: String, enum: ['free', 'independant', 'promo', 'centre', 'student'], default: 'free' },
 
-    login: { type: String, unique: true, lowercase: true, sparse: true },
+    // Pour les étudiants
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     permissions: { type: mongoose.Schema.Types.Mixed, default: {} },
-
-    passwordHash: { type: String, required: true }, // Stocke TOUJOURS un hash
-    role: { type: String, enum: ['solo', 'pro', 'organisation', 'etudiant'], required: true }
+    allowedRooms: { type: [String], default: [] } 
 });
 const User = mongoose.model('User', userSchema);
+// --- FIN MODIFICATION ---
+
 
 const patientSchema = new mongoose.Schema({
     patientId: { type: String, required: true },
@@ -99,11 +87,13 @@ const protect = async (req, res, next) => {
 
 
 // --- ROUTES D'AUTHENTIFICATION (MODIFIÉES) ---
+// Note : Les routes API commencent par /auth ou /api, elles ne
+// seront PAS confondues avec les fichiers statiques.
 
-// POST /auth/signup (Inchangé, hache déjà le mdp)
+// POST /auth/signup (Inchangé, gère l'inscription du formateur)
 app.post('/auth/signup', async (req, res) => {
     try {
-        const { email, password } = req.body;
+        const { email, password, plan } = req.body;
         if (!email || !password) {
             return res.status(400).json({ error: 'Email et mot de passe requis' });
         }
@@ -116,13 +106,19 @@ app.post('/auth/signup', async (req, res) => {
         const passwordHash = await bcrypt.hash(password, 10);
         const confirmationCode = Math.floor(100000 + Math.random() * 900000).toString();
 
+        const validPlans = ['free', 'independant', 'promo', 'centre'];
+        let finalSubscription = 'free';
+        if (plan && validPlans.includes(plan)) {
+            finalSubscription = plan;
+        }
+
         const newUser = new User({ 
             email: email.toLowerCase(), 
-            passwordHash, // Haché
+            passwordHash,
             confirmationCode,
             isVerified: false,
-            role: 'solo',
-            subscription: 'solo'
+            role: 'formateur', 
+            subscription: finalSubscription 
         });
         
         await newUser.save();
@@ -138,6 +134,7 @@ app.post('/auth/signup', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 // POST /auth/verify (Inchangé)
 app.post('/auth/verify', async (req, res) => {
@@ -171,7 +168,7 @@ app.post('/auth/verify', async (req, res) => {
 });
 
 
-// POST /auth/login (MODIFIÉ)
+// POST /auth/login (Inchangé)
 app.post('/auth/login', async (req, res) => {
     try {
         const { identifier, password } = req.body;
@@ -189,15 +186,13 @@ app.post('/auth/login', async (req, res) => {
             return res.status(401).json({ error: 'Identifiants invalides' });
         }
 
-        // --- MODIFIÉ : La vérification par HASH s'applique à TOUS les rôles ---
         const isMatch = await bcrypt.compare(password, user.passwordHash);
-        // --- Fin de la modification ---
 
         if (!isMatch) {
             return res.status(401).json({ error: 'Identifiants invalides' });
         }
         
-        if (user.role !== 'etudiant' && !user.isVerified) {
+        if (user.role === 'formateur' && !user.isVerified) {
             return res.status(401).json({ error: 'Veuillez d\'abord vérifier votre email.' });
         }
         
@@ -214,56 +209,56 @@ app.post('/auth/login', async (req, res) => {
     }
 });
 
-// NOUVEAU : Route pour récupérer les infos de l'utilisateur (permissions)
+// GET /api/auth/me (MODIFIÉ : Logique d'héritage supprimée, renvoie juste les infos)
 app.get('/api/auth/me', protect, (req, res) => {
     // Le middleware 'protect' a déjà récupéré 'req.user'
+    // L'abonnement de l'utilisateur (ex: 'student') est maintenant correct
     res.json({
         id: req.user._id,
         role: req.user.role,
         email: req.user.email,
         login: req.user.login,
-        permissions: req.user.permissions
+        permissions: req.user.permissions,
+        subscription: req.user.subscription, // Renvoie 'student' pour les étudiants
+        allowedRooms: req.user.allowedRooms
     });
 });
 
 // --- NOUVEAU : ROUTES DE GESTION DE COMPTE ---
 
-// GET /api/account/details (MODIFIÉ)
+// GET /api/account/details (Inchangé)
 app.get('/api/account/details', protect, async (req, res) => {
     if (req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
 
     try {
-        // MODIFIÉ : On ne renvoie PAS le hash du mot de passe
         const students = await User.find(
             { createdBy: req.user._id },
-            'login permissions' // On sélectionne login et permissions
+            'login permissions allowedRooms' 
         );
         
         res.json({
             plan: req.user.subscription,
-            students: students // On envoie la liste
+            students: students
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// POST /api/account/change-password (MODIFIÉ)
+// POST /api/account/change-password (Inchangé)
 app.post('/api/account/change-password', protect, async (req, res) => {
     try {
         const { currentPassword, newPassword } = req.body;
         
-        // --- MODIFIÉ : La vérification par HASH s'applique à TOUS les rôles ---
         const isMatch = await bcrypt.compare(currentPassword, req.user.passwordHash);
 
         if (!isMatch) {
             return res.status(400).json({ error: 'Mot de passe actuel incorrect.' });
         }
         
-        // --- MODIFIÉ : On HACHE toujours le nouveau mot de passe ---
-        req.user.passwordHash = await bcrypt.hash(newPassword, 10); // Toujours haché
+        req.user.passwordHash = await bcrypt.hash(newPassword, 10);
 
         await req.user.save();
         
@@ -273,18 +268,13 @@ app.post('/api/account/change-password', protect, async (req, res) => {
     }
 });
 
-// DELETE /api/account/delete
+// DELETE /api/account/delete (Inchangé)
 app.delete('/api/account/delete', protect, async (req, res) => {
     try {
         const userId = req.user._id;
 
-        // 1. Supprimer tous les patients (chambres et sauvegardes) de l'utilisateur
         await Patient.deleteMany({ user: userId });
-        
-        // 2. Supprimer tous les comptes étudiants créés par cet utilisateur
         await User.deleteMany({ createdBy: userId });
-        
-        // 3. Supprimer l'utilisateur lui-même
         await User.deleteOne({ _id: userId });
         
         res.json({ success: true, message: 'Compte supprimé avec succès.' });
@@ -293,13 +283,22 @@ app.delete('/api/account/delete', protect, async (req, res) => {
     }
 });
 
-// POST /api/account/invite (Créer un étudiant) (MODIFIÉ)
+// POST /api/account/invite (MODIFIÉ : Définit subscription: 'student')
 app.post('/api/account/invite', protect, async (req, res) => {
-    if (req.user.role === 'solo' || req.user.role === 'etudiant') {
+    if (req.user.subscription === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
     
     try {
+        const studentCount = await User.countDocuments({ createdBy: req.user._id });
+
+        if (req.user.subscription === 'independant' && studentCount >= 5) {
+            return res.status(403).json({ error: 'Limite de 5 étudiants atteinte pour le plan Indépendant.' });
+        }
+        if (req.user.subscription === 'promo' && studentCount >= 40) {
+            return res.status(403).json({ error: 'Limite de 40 étudiants atteinte pour le plan Promo.' });
+        }
+        
         const { login, password } = req.body;
         
         const existingStudent = await User.findOne({ login: login.toLowerCase() });
@@ -307,31 +306,33 @@ app.post('/api/account/invite', protect, async (req, res) => {
             return res.status(400).json({ error: 'Ce login est déjà utilisé.' });
         }
 
-        // MODIFIÉ : On HACHE le mot de passe de l'étudiant
         const passwordHash = await bcrypt.hash(password, 10);
         
-        // MODIFIÉ : Droits par défaut granulaires
         const defaultPermissions = {
             header: true, 
             admin: true, 
             vie: true, 
             observations: true,
-            prescriptions_add: true, // NOUVEAU
-            prescriptions_delete: true, // NOUVEAU
-            prescriptions_validate: true, // NOUVEAU
+            prescriptions_add: true,
+            prescriptions_delete: true,
+            prescriptions_validate: true,
             transmissions: true, 
             pancarte: true, 
             diagramme: true, 
             biologie: true
         };
 
+        const defaultRooms = Array.from({ length: 10 }, (_, i) => `chambre_${101 + i}`);
+
         const newStudent = new User({
             login: login.toLowerCase(),
-            passwordHash: passwordHash, // On stocke le HASH
-            role: 'etudiant',
+            passwordHash: passwordHash,
+            role: 'etudiant', // Rôle correct
+            subscription: 'student', // MODIFIÉ : Statut explicite 'student'
             createdBy: req.user._id,
             isVerified: true,
-            permissions: defaultPermissions
+            permissions: defaultPermissions,
+            allowedRooms: defaultRooms 
         });
 
         await newStudent.save();
@@ -341,10 +342,11 @@ app.post('/api/account/invite', protect, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+// --- FIN MODIFICATION ---
 
-// PUT /api/account/permissions (Mettre à jour les droits d'un étudiant)
+// PUT /api/account/permissions (Inchangé)
 app.put('/api/account/permissions', protect, async (req, res) => {
-    if (req.user.role === 'solo' || req.user.role === 'etudiant') {
+    if (req.user.subscription === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
     
@@ -360,7 +362,6 @@ app.put('/api/account/permissions', protect, async (req, res) => {
             return res.status(404).json({ error: 'Étudiant non trouvé' });
         }
         
-        // NOUVEAU : S'assurer que l'objet permissions existe
         if (!student.permissions) {
             student.permissions = {};
         }
@@ -376,9 +377,41 @@ app.put('/api/account/permissions', protect, async (req, res) => {
     }
 });
 
-// DELETE /api/account/student (Supprimer un étudiant)
+// PUT /api/account/student/rooms (Inchangé)
+app.put('/api/account/student/rooms', protect, async (req, res) => {
+    if (req.user.subscription === 'free' || req.user.role === 'etudiant') {
+        return res.status(403).json({ error: 'Non autorisé' });
+    }
+    
+    try {
+        const { login, rooms } = req.body;
+        
+        const student = await User.findOne({
+            login: login.toLowerCase(),
+            createdBy: req.user._id
+        });
+
+        if (!student) {
+            return res.status(404).json({ error: 'Étudiant non trouvé' });
+        }
+        
+        if (!Array.isArray(rooms) || !rooms.every(r => typeof r === 'string' && r.startsWith('chambre_'))) {
+             return res.status(400).json({ error: 'Format de chambres non valide.' });
+        }
+
+        student.allowedRooms = rooms;
+        await student.save();
+        
+        res.json({ success: true, message: 'Chambres autorisées mises à jour.' });
+        
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// DELETE /api/account/student (Inchangé)
 app.delete('/api/account/student', protect, async (req, res) => {
-    if (req.user.role === 'solo' || req.user.role === 'etudiant') {
+    if (req.user.subscription === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
     
@@ -401,15 +434,55 @@ app.delete('/api/account/student', protect, async (req, res) => {
     }
 });
 
+// POST /api/account/change-subscription (Inchangé)
+app.post('/api/account/change-subscription', protect, async (req, res) => {
+    try {
+        const { newPlan } = req.body;
+        const validPlans = ['free', 'independant', 'promo', 'centre']; // Ne contient pas 'student'
+        if (!newPlan || !validPlans.includes(newPlan)) {
+            return res.status(400).json({ error: 'Plan non valide.' });
+        }
 
-// --- ROUTES DE L'API (Protégées et MODIFIÉES) ---
+        if (req.user.role === 'etudiant') {
+            return res.status(403).json({ error: 'Non autorisé.' });
+        }
 
-// GET /api/patients (MODIFIÉ)
+        const user = await User.findById(req.user._id);
+        if (!user) {
+            return res.status(404).json({ error: 'Utilisateur non trouvé.' });
+        }
+
+        user.subscription = newPlan;
+        user.role = 'formateur';
+
+        await user.save();
+        
+        res.json({ 
+            success: true, 
+            message: 'Abonnement mis à jour.',
+            subscription: user.subscription,
+            role: user.role
+        });
+
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+// --- ROUTES DE L'API (Protégées) ---
+
+// GET /api/patients (Inchangé)
 app.get('/api/patients', protect, async (req, res) => {
     try {
-        // MODIFIÉ : Utilise 'resourceId' (l'ID du formateur)
+        const query = { user: req.user.resourceId };
+
+        if (req.user.role === 'etudiant') {
+            query.patientId = { $in: req.user.allowedRooms };
+        }
+
         const patients = await Patient.find(
-            { user: req.user.resourceId }, 
+            query, 
             'patientId sidebar_patient_name'
         );
         res.json(patients);
@@ -418,10 +491,9 @@ app.get('/api/patients', protect, async (req, res) => {
     }
 });
 
-// POST /api/patients/save (MODIFIÉ)
+// POST /api/patients/save (MODIFIÉ : Ajout de la limite de sauvegarde)
 app.post('/api/patients/save', protect, async (req, res) => {
-    // MODIFIÉ : Les étudiants ne peuvent pas sauvegarder de "cas"
-    if (req.user.role === 'etudiant') {
+    if (req.user.role === 'etudiant' || req.user.subscription === 'free') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
 
@@ -432,7 +504,6 @@ app.post('/api/patients/save', protect, async (req, res) => {
             return res.status(400).json({ error: 'Veuillez donner un nom au patient dans l\'en-tête avant de sauvegarder.' });
         }
 
-        // MODIFIÉ : Utilise 'resourceId' (l'ID du formateur, qui est son propre ID ici)
         const existingSave = await Patient.findOne({
             user: req.user.resourceId,
             sidebar_patient_name: sidebar_patient_name,
@@ -440,12 +511,41 @@ app.post('/api/patients/save', protect, async (req, res) => {
         });
 
         if (existingSave) {
+            // L'utilisateur met à jour une sauvegarde existante, pas de vérification de limite.
             await Patient.updateOne(
                 { _id: existingSave._id },
                 { dossierData: dossierData }
             );
             res.json({ success: true, message: 'Sauvegarde mise à jour.' });
         } else {
+            // =================================================================
+            // DÉBUT DE LA MODIFICATION : Vérification de la limite de sauvegarde
+            // =================================================================
+            const subscription = req.user.subscription;
+            
+            // Le plan 'centre' n'a pas de limite
+            if (subscription === 'independant' || subscription === 'promo') {
+                
+                const saveCount = await Patient.countDocuments({
+                    user: req.user.resourceId,
+                    patientId: { $regex: /^save_/ }
+                });
+
+                let limit = 0;
+                if (subscription === 'independant') limit = 20;
+                if (subscription === 'promo') limit = 50;
+
+                if (saveCount >= limit) {
+                    return res.status(403).json({ 
+                        error: `Limite de ${limit} archives atteinte pour le plan ${subscription}.` 
+                    });
+                }
+            }
+            // =================================================================
+            // FIN DE LA MODIFICATION
+            // =================================================================
+
+            // Si la limite n'est pas atteinte (ou si c'est 'centre'), on crée la sauvegarde.
             const newPatientId = `save_${new mongoose.Types.ObjectId()}`;
             const newPatient = new Patient({
                 patientId: newPatientId,
@@ -461,10 +561,12 @@ app.post('/api/patients/save', protect, async (req, res) => {
     }
 });
 
-// GET /api/patients/:patientId (MODIFIÉ)
+
+// GET /api/patients/:patientId (MODIFIÉ : Simplification, suppression de la vérification 'free' ici)
 app.get('/api/patients/:patientId', protect, async (req, res) => {
     try {
-        // MODIFIÉ : Utilise 'resourceId' (l'ID du formateur)
+        // La logique 'free' sera gérée par le frontend (app.js)
+        
         let patient = await Patient.findOne({ 
             patientId: req.params.patientId,
             user: req.user.resourceId
@@ -487,18 +589,19 @@ app.get('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
-// POST /api/patients/:patientId (MODIFIÉ)
+// POST /api/patients/:patientId (MODIFIÉ : Simplification, suppression de la vérification 'free' ici)
 app.post('/api/patients/:patientId', protect, async (req, res) => {
     try {
+        // La logique 'free' sera gérée par le frontend (app.js)
+        
         if (!req.params.patientId.startsWith('chambre_')) {
             return res.status(400).json({ error: 'Cette route est réservée à la mise à jour des chambres.' });
         }
 
         const { dossierData, sidebar_patient_name } = req.body;
-        const userIdToSave = req.user.resourceId; // ID du formateur
+        const userIdToSave = req.user.resourceId;
         let finalDossierData = dossierData;
 
-        // NOUVEAU : Si c'est un étudiant, filtrer les données à sauvegarder
         if (req.user.role === 'etudiant') {
             const permissions = req.user.permissions;
             
@@ -510,7 +613,6 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             
             const mergedData = { ...existingData };
 
-            // Écraser *uniquement* les champs autorisés
             if (permissions.header) {
                 Object.keys(dossierData).forEach(key => {
                     if (key.startsWith('patient-') || key === 'admin-nom-usage' || key === 'admin-prenom' || key === 'admin-dob') {
@@ -536,14 +638,9 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
                 mergedData['observations-list_html'] = dossierData['observations-list_html'];
             }
             
-            // MODIFIÉ : Utilisation des permissions granulaires
             if (permissions.prescriptions_add || permissions.prescriptions_delete || permissions.prescriptions_validate) {
-                // Le front-end (app.js) est censé n'envoyer que les modifications autorisées.
-                // Ici, on accepte le bloc 'prescriptions' si *n'importe quelle* permission est vraie.
-                // La logique fine est gérée côté client.
                 mergedData['prescriptions'] = dossierData['prescriptions'];
             }
-            // FIN DE LA MODIFICATION
             
             if (permissions.transmissions) {
                 mergedData['transmissions-list-ide_html'] = dossierData['transmissions-list-ide_html'];
@@ -579,15 +676,17 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
-// DELETE /api/patients/:patientId (MODIFIÉ)
+// DELETE /api/patients/:patientId (MODIFIÉ : Simplification, suppression de la vérification 'free' ici)
 app.delete('/api/patients/:patientId', protect, async (req, res) => {
+    // La logique 'free' sera gérée par le frontend (app.js)
+    
     if (req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
 
     try {
         const patientId = req.params.patientId;
-        const userId = req.user.resourceId; // Son propre ID
+        const userId = req.user.resourceId;
 
         if (patientId.startsWith('chambre_')) {
             await Patient.findOneAndUpdate(
@@ -614,6 +713,12 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
+// AJOUTÉ : Route "Catch-all" pour servir index.html
+// Doit être APRÈS les routes API et AVANT le démarrage du serveur
+app.get('/*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
 
 // --- DÉMARRAGE DU SERVEUR ---
 mongoose.connect(MONGO_URI)
@@ -626,7 +731,4 @@ mongoose.connect(MONGO_URI)
     .catch((err) => {
         console.error('❌ Erreur de connexion à MongoDB :', err);
         process.exit(1);
-
     });
-
-
