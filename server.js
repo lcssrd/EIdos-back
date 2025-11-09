@@ -266,6 +266,38 @@ app.post('/api/account/change-password', protect, async (req, res) => {
     }
 });
 
+// NOUVEAU : POST /api/account/change-email
+app.post('/api/account/change-email', protect, async (req, res) => {
+    // Les étudiants ne peuvent pas changer leur email (seulement leur formateur)
+    if (req.user.role === 'etudiant') {
+        return res.status(403).json({ error: 'Non autorisé' });
+    }
+
+    try {
+        const { newEmail, password } = req.body;
+
+        // 1. Vérifier le mot de passe actuel
+        const isMatch = await bcrypt.compare(password, req.user.passwordHash);
+        if (!isMatch) {
+            return res.status(400).json({ error: 'Mot de passe actuel incorrect.' });
+        }
+
+        // 2. Vérifier si le nouvel email est déjà pris
+        const existingUser = await User.findOne({ email: newEmail.toLowerCase() });
+        if (existingUser) {
+            return res.status(400).json({ error: 'Cette adresse email est déjà utilisée.' });
+        }
+
+        // 3. Mettre à jour l'email
+        req.user.email = newEmail.toLowerCase();
+        await req.user.save();
+        
+        res.json({ success: true, message: 'Adresse email mise à jour.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // DELETE /api/account/delete (Inchangé)
 app.delete('/api/account/delete', protect, async (req, res) => {
     try {
