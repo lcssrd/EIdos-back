@@ -4,8 +4,7 @@
   "description": "Serveur pour EIdos",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "postinstall": "npm install"
+    "start": "node server.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -13,7 +12,7 @@
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.4.1",
-    "nodemailer": "^6.9.14" 
+    "nodemailer": "^6.9.14"
   },
   "engines": {
     "node": "18.x"
