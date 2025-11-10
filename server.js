@@ -1049,17 +1049,6 @@ app.post('/api/webhook/payment-received', express.raw({type: 'application/json'}
 });
 
 
-// AJOUTÉ : Route "Catch-all" pour servir index.html
-// Doit être APRÈS les routes API et AVANT le démarrage du serveur
-app.get('/*', (req, res) => {
-    // Si le fichier demandé n'est pas trouvé par express.static (ex: /simul.html, /account.html)
-    // on renvoie index.html pour que le routing frontend prenne le relais.
-    // MAIS, vos fichiers sont servis statiquement.
-    // Cette route sert de fallback si l'utilisateur tape une URL inconnue.
-    // On va plutôt renvoyer la page principale (auth.html ou index.html)
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
-
 
 // --- DÉMARRAGE DU SERVEUR ---
 mongoose.connect(MONGO_URI)
@@ -1074,3 +1063,4 @@ mongoose.connect(MONGO_URI)
         process.exit(1);
 
     });
+
