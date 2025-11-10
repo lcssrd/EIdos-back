@@ -3,48 +3,107 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-// const path = require('path'); // SUPPRIMÉ
+const path = require('path');
+const crypto = require('crypto'); // Nécessaire pour les tokens d'invitation
+const nodemailer = require('nodemailer'); // Nécessaire pour envoyer les e-mails
 
 // --- CONFIGURATION ---
 const app = express();
 app.use(cors()); 
 app.use(express.json());
 
-// SUPPRIMÉ : Le app.use(express.static(...)) a été retiré
+app.use(express.static(path.join(__dirname)));
 
-// MODIFIÉ : Utiliser le port de Render, ou 3000 par défaut
 const PORT = process.env.PORT || 3000;
-const MONGO_URI = "mongodb+srv://lucasseraudie_db_user:9AnBALAG30WhZ3Ce@eidos.lelleaw.mongodb.net/?appName=EIdos";
-const JWT_SECRET = "mettez_une_phrase_secrete_tres_longue_ici";
+const MONGO_URI = "mongodb+srv://lucasseraudie_db_user:9AnBALAG30WhZ3Ce@eidos.lelleaw.mongodb.net/?appName=EIdos"; // Assurez-vous que c'est la bonne
+const JWT_SECRET = "mettez_une_phrase_secrete_tres_longue_ici"; // !! CHANGEZ CECI EN PRODUCTION !!
+
+// --- CONFIGURATION SIMULÉE DE NODEMAILER ---
+// (Remplacez par vos vrais identifiants de service d'e-mail, ex: SendGrid, Mailgun, ou un compte Gmail/SMTP)
+const transporter = nodemailer.createTransport({
+    host: 'smtp.ethereal.email',
+    port: 587,
+    auth: {
+        user: 'reyna.vonrueden@ethereal.email', // Compte test Ethereal
+        pass: 'JqXN2AMJ9xnmZ2N4Gg'       // Compte test Ethereal
+    }
+});
+
+console.log("Pour voir les e-mails d'invitation de test, allez sur : https://ethereal.email/login");
+
 
 // --- MODÈLES DE DONNÉES (SCHEMAS) ---
 
-// --- MODIFIÉ : Schéma Utilisateur (Ajout du statut 'student') ---
+// NOUVEAU : Schéma pour les Organisations (Plan Centre)
+const organisationSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // Le 'Propriétaire'
+    plan: { type: String, default: 'centre', enum: ['centre'] },
+    licences_max: { type: Number, default: 50 }, // Le nombre de formateurs (sièges)
+    
+    // Pour le paiement sur devis
+    quote_url: { type: String, default: null }, // Le lien de paiement Stripe
+    quote_price: { type: String, default: null }, // Le texte "2000€/an"
+    is_active: { type: Boolean, default: false } // Devient 'true' après le paiement
+});
+const Organisation = mongoose.model('Organisation', organisationSchema);
+
+// NOUVEAU : Schéma pour les invitations de Formateurs
+const invitationSchema = new mongoose.Schema({
+    email: { type: String, required: true, lowercase: true, index: true },
+    organisation: { type: mongoose.Schema.Types.ObjectId, ref: 'Organisation', required: true },
+    token: { type: String, required: true, unique: true },
+    expires_at: { type: Date, default: () => Date.now() + 7*24*60*60*1000 } // Expire dans 7 jours
+});
+const Invitation = mongoose.model('Invitation', invitationSchema);
+
+
+// MODIFIÉ : Schéma Utilisateur (gestion des rôles et de l'organisation)
 const userSchema = new mongoose.Schema({
-    email: { type: String, unique: true, lowercase: true, sparse: true }, // Pour les formateurs
-    login: { type: String, unique: true, lowercase: true, sparse: true }, // Pour les étudiants
+    email: { type: String, unique: true, lowercase: true, sparse: true }, // Pour formateurs/owners
+    login: { type: String, unique: true, lowercase: true, sparse: true }, // Pour étudiants
 
     passwordHash: { type: String, required: true },
     isVerified: { type: Boolean, default: false },
     confirmationCode: { type: String },
     
-    // Rôle simplifié
-    role: { type: String, enum: ['formateur', 'etudiant'], required: true },
+    // NOUVEAUX RÔLES
+    role: { 
+        type: String, 
+        enum: ['user', 'formateur', 'owner', 'etudiant'], // user = standard, owner = admin du centre, formateur = invité du centre
+        required: true 
+    },
     
-    // Nouveaux plans (avec 'student' ajouté)
-    subscription: { type: String, enum: ['free', 'independant', 'promo', 'centre', 'student'], default: 'free' },
+    // Plan personnel (pour 'user')
+    subscription: { 
+        type: String, 
+        enum: ['free', 'independant', 'promo'], 
+        default: 'free' 
+    },
 
-    // Pour les étudiants
-    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    // --- LIENS ---
+    
+    // Si role='etudiant', ceci est l'ID du formateur/owner qui l'a créé
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }, 
+    
+    // Si role='formateur' ou 'owner', ceci est l'ID de leur organisation
+    organisation: { type: mongoose.Schema.Types.ObjectId, ref: 'Organisation', default: null },
+    
+    // Pour différencier le payeur des invités dans une organisation
+    is_owner: { type: Boolean, default: false }, 
+
+    // --- Données spécifiques aux étudiants ---
     permissions: { type: mongoose.Schema.Types.Mixed, default: {} },
     allowedRooms: { type: [String], default: [] } 
 });
 const User = mongoose.model('User', userSchema);
-// --- FIN MODIFICATION ---
+// --- FIN MODIFICATION SCHÉMA USER ---
 
 
 const patientSchema = new mongoose.Schema({
     patientId: { type: String, required: true },
+    // Ce 'user' est maintenant l'ID du "propriétaire des ressources"
+    // (le 'resourceId' défini dans le middleware protect)
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     sidebar_patient_name: { type: String, default: '' },
     dossierData: { type: mongoose.Schema.Types.Mixed, default: {} }
@@ -53,7 +112,7 @@ patientSchema.index({ patientId: 1, user: 1 }, { unique: true });
 const Patient = mongoose.model('Patient', patientSchema);
 
 
-// --- Middleware de sécurité (Inchangé) ---
+// --- Middleware de sécurité (MODIFIÉ) ---
 const protect = async (req, res, next) => {
     const header = req.headers.authorization;
     if (!header || !header.startsWith('Bearer ')) {
@@ -64,34 +123,55 @@ const protect = async (req, res, next) => {
 
     try {
         const decoded = jwt.verify(token, JWT_SECRET);
-        const user = await User.findById(decoded.id);
+        
+        // MODIFIÉ : On "populate" l'organisation si elle existe
+        const user = await User.findById(decoded.id).populate('organisation');
+        
         if (!user) {
             return res.status(401).json({ error: 'Utilisateur non trouvé' });
         }
         
-        req.user = user; 
+        req.user = user; // Le 'user' complet (avec .organisation) est attaché à la requête
 
+        // --- Définition de l'ID des ressources (qui possède les patients/étudiants ?) ---
         if (user.role === 'etudiant') {
+            // Un étudiant accède aux ressources de son créateur
             req.user.resourceId = user.createdBy;
+        } else if (user.role === 'formateur' && user.organisation) {
+            // Un formateur invité accède aux ressources du propriétaire de l'organisation
+            req.user.resourceId = user.organisation.owner;
         } else {
+            // Un 'user' (indépendant/promo) ou un 'owner' (centre) est propriétaire de ses propres ressources
             req.user.resourceId = user._id;
+        }
+        
+        // --- Définition du Plan effectif ---
+        if ((user.role === 'formateur' || user.role === 'owner') && user.organisation && user.organisation.is_active) {
+            // S'il fait partie d'une organisation active, son plan est celui de l'organisation
+            req.user.effectivePlan = user.organisation.plan; 
+        } else if (user.role === 'etudiant') {
+            // L'étudiant n'a pas de plan, mais on lui donne un statut pour l'API
+            req.user.effectivePlan = 'student';
+        } else {
+            // Sinon, c'est son plan personnel
+            req.user.effectivePlan = user.subscription;
         }
         
         next(); 
     } catch (err) {
+        console.error("Erreur Middleware Protect:", err);
         res.status(401).json({ error: 'Non autorisé (token invalide)' });
     }
 };
 
 
 // --- ROUTES D'AUTHENTIFICATION (MODIFIÉES) ---
-// Note : Les routes API commencent par /auth ou /api, elles ne
-// seront PAS confondues avec les fichiers statiques.
 
-// POST /auth/signup (Inchangé, gère l'inscription du formateur)
+// POST /auth/signup (MODIFIÉ : Gère les invitations et le plan 'centre')
 app.post('/auth/signup', async (req, res) => {
     try {
-        const { email, password, plan } = req.body;
+        const { email, password, plan, token } = req.body; // 'plan' pour l'inscription normale, 'token' pour l'invitation
+        
         if (!email || !password) {
             return res.status(400).json({ error: 'Email et mot de passe requis' });
         }
@@ -104,31 +184,103 @@ app.post('/auth/signup', async (req, res) => {
         const passwordHash = await bcrypt.hash(password, 10);
         const confirmationCode = Math.floor(100000 + Math.random() * 900000).toString();
 
-        const validPlans = ['free', 'independant', 'promo', 'centre'];
-        let finalSubscription = 'free';
-        if (plan && validPlans.includes(plan)) {
-            finalSubscription = plan;
+        let newUser;
+
+        if (token) {
+            // --- Logique d'invitation (l'utilisateur rejoint un Centre) ---
+            const invitation = await Invitation.findOne({ token: token, email: email.toLowerCase() }).populate('organisation');
+            
+            if (!invitation || invitation.expires_at < Date.now()) {
+                return res.status(400).json({ error: "Token d'invitation invalide ou expiré." });
+            }
+
+            // Compter les licences
+            const formateurCount = await User.countDocuments({ 
+                organisation: invitation.organisation._id, 
+                role: 'formateur' 
+            });
+
+            if (formateurCount >= invitation.organisation.licences_max) {
+                 return res.status(403).json({ error: "Le nombre maximum de formateurs pour ce centre a été atteint." });
+            }
+
+            newUser = new User({ 
+                email: email.toLowerCase(), 
+                passwordHash,
+                isVerified: true, // L'invitation par e-mail vaut vérification
+                role: 'formateur',
+                subscription: 'free', // Le plan perso est 'free', il hérite du plan 'centre'
+                organisation: invitation.organisation._id,
+                is_owner: false
+            });
+            
+            await newUser.save();
+            await Invitation.deleteOne({ _id: invitation._id }); // Supprime le token
+
+        } else {
+            // --- Logique d'inscription standard ---
+            const validPlans = ['free', 'independant', 'promo', 'centre'];
+            let finalSubscription = 'free';
+            if (plan && validPlans.includes(plan)) {
+                finalSubscription = plan;
+            }
+            
+            if (finalSubscription === 'centre') {
+                // L'utilisateur crée un plan Centre (il devient 'owner')
+                newUser = new User({
+                    email: email.toLowerCase(),
+                    passwordHash,
+                    confirmationCode,
+                    isVerified: false,
+                    role: 'owner', // Il est propriétaire
+                    subscription: 'free', // Son plan perso est 'free'
+                    is_owner: true
+                });
+                await newUser.save(); // Sauve l'utilisateur d'abord pour avoir un _id
+
+                // Crée l'organisation
+                const newOrganisation = new Organisation({
+                    name: `Centre de ${email}`, // Nom par défaut
+                    owner: newUser._id,
+                    is_active: false, // Inactif jusqu'au paiement
+                    
+                    // TODO ADMIN : L'admin doit remplir ces champs manuellement
+                    quote_url: "https://votre-site.com/lien-admin-a-remplir", 
+                    quote_price: "Devis en attente"
+                });
+                await newOrganisation.save();
+                
+                // Lie l'organisation à l'utilisateur
+                newUser.organisation = newOrganisation._id;
+                await newUser.save();
+                
+            } else {
+                // Inscription standard (Free, Indep, Promo)
+                newUser = new User({ 
+                    email: email.toLowerCase(), 
+                    passwordHash,
+                    confirmationCode,
+                    isVerified: false,
+                    role: 'user', // Rôle 'user' standard
+                    subscription: finalSubscription 
+                });
+                await newUser.save();
+            }
         }
-
-        const newUser = new User({ 
-            email: email.toLowerCase(), 
-            passwordHash,
-            confirmationCode,
-            isVerified: false,
-            role: 'formateur', 
-            subscription: finalSubscription 
-        });
         
-        await newUser.save();
+        // N'envoie un code de vérification que si ce n'est pas une invitation
+        if (!token) {
+            console.log(`CODE DE VÉRIFICATION pour ${email}: ${confirmationCode}`);
+            // TODO : Envoyer le VRAI email de vérification
+        }
         
-        console.log(`CODE DE VÉRIFICATION pour ${email}: ${confirmationCode}`);
-
         res.status(201).json({ 
             success: true, 
             message: 'Utilisateur créé. Veuillez vérifier votre email.',
-            _test_code: confirmationCode 
+            _test_code: token ? null : confirmationCode 
         });
     } catch (err) {
+        console.error(err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -190,7 +342,7 @@ app.post('/auth/login', async (req, res) => {
             return res.status(401).json({ error: 'Identifiants invalides' });
         }
         
-        if (user.role === 'formateur' && !user.isVerified) {
+        if (user.role === 'user' && !user.isVerified) {
             return res.status(401).json({ error: 'Veuillez d\'abord vérifier votre email.' });
         }
         
@@ -207,38 +359,55 @@ app.post('/auth/login', async (req, res) => {
     }
 });
 
-// GET /api/auth/me (MODIFIÉ : Logique d'héritage supprimée, renvoie juste les infos)
-app.get('/api/auth/me', protect, (req, res) => {
-    // Le middleware 'protect' a déjà récupéré 'req.user'
-    // L'abonnement de l'utilisateur (ex: 'student') est maintenant correct
+// GET /api/auth/me (MODIFIÉ : Renvoie l'utilisateur peuplé)
+app.get('/api/auth/me', protect, async (req, res) => {
+    // req.user est déjà chargé et peuplé par le middleware 'protect'
+    // On renvoie l'utilisateur complet (avec 'organisation' si elle existe)
+    // et le 'effectivePlan' calculé
     res.json({
-        id: req.user._id,
-        role: req.user.role,
-        email: req.user.email,
-        login: req.user.login,
-        permissions: req.user.permissions,
-        subscription: req.user.subscription, // Renvoie 'student' pour les étudiants
-        allowedRooms: req.user.allowedRooms
+        ...req.user.toObject(), // Convertit le document Mongoose en objet
+        effectivePlan: req.user.effectivePlan // Ajoute le plan calculé
     });
 });
 
-// --- NOUVEAU : ROUTES DE GESTION DE COMPTE ---
+// --- ROUTES DE GESTION DE COMPTE (MODIFIÉES) ---
 
-// GET /api/account/details (Inchangé)
+// GET /api/account/details (MODIFIÉ : Gère les rôles)
 app.get('/api/account/details', protect, async (req, res) => {
     if (req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
 
     try {
+        // resourceId est l'ID du propriétaire (pour owner, formateur) ou de l'utilisateur (pour user)
         const students = await User.find(
-            { createdBy: req.user._id },
+            { createdBy: req.user.resourceId },
             'login permissions allowedRooms' 
         );
         
+        let organisationData = null;
+        if (req.user.is_owner && req.user.organisation) {
+            // Si c'est un 'owner', on charge les détails de l'orga et la liste des formateurs
+            const formateurs = await User.find(
+                { organisation: req.user.organisation._id, is_owner: false }, // role: 'formateur'
+                'email'
+            );
+            
+            // req.user.organisation est déjà peuplé par le middleware 'protect'
+            organisationData = {
+                ...req.user.organisation.toObject(),
+                formateurs: formateurs,
+                licences_utilisees: formateurs.length + 1 // +1 pour le 'owner'
+            };
+        }
+
         res.json({
-            plan: req.user.subscription,
-            students: students
+            email: req.user.email,
+            plan: req.user.effectivePlan, // Le plan réel (perso ou orga)
+            role: req.user.role,
+            is_owner: req.user.is_owner,
+            students: students,
+            organisation: organisationData // Sera null si l'utilisateur n'est pas 'owner'
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -266,45 +435,29 @@ app.post('/api/account/change-password', protect, async (req, res) => {
     }
 });
 
-// NOUVEAU : POST /api/account/change-email
-app.post('/api/account/change-email', protect, async (req, res) => {
-    // Les étudiants ne peuvent pas changer leur email (seulement leur formateur)
-    if (req.user.role === 'etudiant') {
-        return res.status(403).json({ error: 'Non autorisé' });
-    }
-
-    try {
-        const { newEmail, password } = req.body;
-
-        // 1. Vérifier le mot de passe actuel
-        const isMatch = await bcrypt.compare(password, req.user.passwordHash);
-        if (!isMatch) {
-            return res.status(400).json({ error: 'Mot de passe actuel incorrect.' });
-        }
-
-        // 2. Vérifier si le nouvel email est déjà pris
-        const existingUser = await User.findOne({ email: newEmail.toLowerCase() });
-        if (existingUser) {
-            return res.status(400).json({ error: 'Cette adresse email est déjà utilisée.' });
-        }
-
-        // 3. Mettre à jour l'email
-        req.user.email = newEmail.toLowerCase();
-        await req.user.save();
-        
-        res.json({ success: true, message: 'Adresse email mise à jour.' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// DELETE /api/account/delete (Inchangé)
+// DELETE /api/account/delete (MODIFIÉ : Gère la suppression d'organisation)
 app.delete('/api/account/delete', protect, async (req, res) => {
     try {
         const userId = req.user._id;
 
-        await Patient.deleteMany({ user: userId });
+        // Supprime les patients liés à ce 'resourceId'
+        await Patient.deleteMany({ user: req.user.resourceId });
+        // Supprime les étudiants créés par cet utilisateur
         await User.deleteMany({ createdBy: userId });
+
+        if (req.user.is_owner && req.user.organisation) {
+            // Si c'est un propriétaire, il supprime aussi l'organisation
+            const orgId = req.user.organisation._id;
+            // Met à jour tous les formateurs de cette orga pour les détacher
+            await User.updateMany(
+                { organisation: orgId },
+                { $set: { organisation: null, role: 'user', subscription: 'free' } }
+            );
+            // Supprime l'organisation
+            await Organisation.deleteOne({ _id: orgId });
+        }
+        
+        // Finalement, supprime l'utilisateur
         await User.deleteOne({ _id: userId });
         
         res.json({ success: true, message: 'Compte supprimé avec succès.' });
@@ -313,21 +466,29 @@ app.delete('/api/account/delete', protect, async (req, res) => {
     }
 });
 
-// POST /api/account/invite (MODIFIÉ : Définit subscription: 'student')
+// POST /api/account/invite (Création étudiant - MODIFIÉ)
 app.post('/api/account/invite', protect, async (req, res) => {
-    if (req.user.subscription === 'free' || req.user.role === 'etudiant') {
+    // Seuls les formateurs (de tout type) peuvent inviter des étudiants
+    if (req.user.role === 'etudiant') {
+        return res.status(403).json({ error: 'Non autorisé' });
+    }
+    
+    // Le plan effectif est vérifié
+    if (req.user.effectivePlan === 'free') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
     
     try {
-        const studentCount = await User.countDocuments({ createdBy: req.user._id });
+        // Les étudiants sont comptés par rapport au 'resourceId'
+        const studentCount = await User.countDocuments({ createdBy: req.user.resourceId });
 
-        if (req.user.subscription === 'independant' && studentCount >= 5) {
+        if (req.user.effectivePlan === 'independant' && studentCount >= 5) {
             return res.status(403).json({ error: 'Limite de 5 étudiants atteinte pour le plan Indépendant.' });
         }
-        if (req.user.subscription === 'promo' && studentCount >= 40) {
+        if (req.user.effectivePlan === 'promo' && studentCount >= 40) {
             return res.status(403).json({ error: 'Limite de 40 étudiants atteinte pour le plan Promo.' });
         }
+        // Le plan 'centre' n'a pas de limite d'étudiants
         
         const { login, password } = req.body;
         
@@ -339,17 +500,9 @@ app.post('/api/account/invite', protect, async (req, res) => {
         const passwordHash = await bcrypt.hash(password, 10);
         
         const defaultPermissions = {
-            header: true, 
-            admin: true, 
-            vie: true, 
-            observations: true,
-            prescriptions_add: true,
-            prescriptions_delete: true,
-            prescriptions_validate: true,
-            transmissions: true, 
-            pancarte: true, 
-            diagramme: true, 
-            biologie: true
+            header: true, admin: true, vie: true, observations: true,
+            prescriptions_add: true, prescriptions_delete: true, prescriptions_validate: true,
+            transmissions: true, pancarte: true, diagramme: true, biologie: true
         };
 
         const defaultRooms = Array.from({ length: 10 }, (_, i) => `chambre_${101 + i}`);
@@ -357,9 +510,9 @@ app.post('/api/account/invite', protect, async (req, res) => {
         const newStudent = new User({
             login: login.toLowerCase(),
             passwordHash: passwordHash,
-            role: 'etudiant', // Rôle correct
-            subscription: 'student', // MODIFIÉ : Statut explicite 'student'
-            createdBy: req.user._id,
+            role: 'etudiant',
+            subscription: 'free', // Le plan 'student' n'existe plus, on met 'free'
+            createdBy: req.user.resourceId, // L'étudiant est créé par le 'resourceId'
             isVerified: true,
             permissions: defaultPermissions,
             allowedRooms: defaultRooms 
@@ -372,11 +525,10 @@ app.post('/api/account/invite', protect, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
-// --- FIN MODIFICATION ---
 
-// PUT /api/account/permissions (Inchangé)
+// PUT /api/account/permissions (MODIFIÉ : Vérifie le 'resourceId')
 app.put('/api/account/permissions', protect, async (req, res) => {
-    if (req.user.subscription === 'free' || req.user.role === 'etudiant') {
+    if (req.user.effectivePlan === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
     
@@ -385,7 +537,7 @@ app.put('/api/account/permissions', protect, async (req, res) => {
         
         const student = await User.findOne({
             login: login.toLowerCase(),
-            createdBy: req.user._id
+            createdBy: req.user.resourceId // Vérifie que l'étudiant appartient bien à ce formateur/owner
         });
 
         if (!student) {
@@ -407,9 +559,9 @@ app.put('/api/account/permissions', protect, async (req, res) => {
     }
 });
 
-// PUT /api/account/student/rooms (Inchangé)
+// PUT /api/account/student/rooms (MODIFIÉ : Vérifie le 'resourceId')
 app.put('/api/account/student/rooms', protect, async (req, res) => {
-    if (req.user.subscription === 'free' || req.user.role === 'etudiant') {
+    if (req.user.effectivePlan === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
     
@@ -418,7 +570,7 @@ app.put('/api/account/student/rooms', protect, async (req, res) => {
         
         const student = await User.findOne({
             login: login.toLowerCase(),
-            createdBy: req.user._id
+            createdBy: req.user.resourceId // Vérifie que l'étudiant appartient bien à ce formateur/owner
         });
 
         if (!student) {
@@ -439,9 +591,9 @@ app.put('/api/account/student/rooms', protect, async (req, res) => {
     }
 });
 
-// DELETE /api/account/student (Inchangé)
+// DELETE /api/account/student (MODIFIÉ : Vérifie le 'resourceId')
 app.delete('/api/account/student', protect, async (req, res) => {
-    if (req.user.subscription === 'free' || req.user.role === 'etudiant') {
+    if (req.user.effectivePlan === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
     
@@ -450,7 +602,7 @@ app.delete('/api/account/student', protect, async (req, res) => {
         
         const result = await User.deleteOne({
             login: login.toLowerCase(),
-            createdBy: req.user._id
+            createdBy: req.user.resourceId // Vérifie que l'étudiant appartient bien à ce formateur/owner
         });
 
         if (result.deletedCount === 0) {
@@ -464,11 +616,11 @@ app.delete('/api/account/student', protect, async (req, res) => {
     }
 });
 
-// POST /api/account/change-subscription (Inchangé)
+// POST /api/account/change-subscription (MODIFIÉ : Gère la création d'organisation)
 app.post('/api/account/change-subscription', protect, async (req, res) => {
     try {
         const { newPlan } = req.body;
-        const validPlans = ['free', 'independant', 'promo', 'centre']; // Ne contient pas 'student'
+        const validPlans = ['free', 'independant', 'promo', 'centre'];
         if (!newPlan || !validPlans.includes(newPlan)) {
             return res.status(400).json({ error: 'Plan non valide.' });
         }
@@ -481,18 +633,141 @@ app.post('/api/account/change-subscription', protect, async (req, res) => {
         if (!user) {
             return res.status(404).json({ error: 'Utilisateur non trouvé.' });
         }
-
-        user.subscription = newPlan;
-        user.role = 'formateur';
+        
+        if (newPlan === 'centre') {
+            // L'utilisateur demande un plan Centre
+            if (user.organisation) {
+                return res.status(400).json({ error: "Vous êtes déjà rattaché à un centre." });
+            }
+            
+            user.role = 'owner';
+            user.is_owner = true;
+            
+            const newOrganisation = new Organisation({
+                name: `Centre de ${user.email}`,
+                owner: user._id,
+                is_active: false, // Inactif jusqu'au paiement du devis
+                
+                // TODO ADMIN : L'admin doit remplir ces champs manuellement
+                quote_url: "https://votre-site.com/lien-admin-a-remplir", 
+                quote_price: "Devis en attente"
+            });
+            await newOrganisation.save();
+            
+            user.organisation = newOrganisation._id;
+            
+        } else {
+            // Changement vers un plan personnel
+            user.subscription = newPlan;
+            user.role = 'user';
+            user.is_owner = false;
+            user.organisation = null; 
+        }
 
         await user.save();
         
         res.json({ 
             success: true, 
-            message: 'Abonnement mis à jour.',
-            subscription: user.subscription,
-            role: user.role
+            message: 'Abonnement mis à jour.'
         });
+
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+// --- NOUVELLES ROUTES POUR L'ORGANISATION ---
+
+// POST /api/organisation/invite (Pour inviter un FORMATEUR)
+app.post('/api/organisation/invite', protect, async (req, res) => {
+    if (!req.user.is_owner || !req.user.organisation) {
+        return res.status(403).json({ error: 'Non autorisé (réservé aux propriétaires de centre).' });
+    }
+
+    try {
+        const { email } = req.body;
+        const organisation = req.user.organisation; // Déjà peuplé
+
+        // 1. Vérifier si l'email existe déjà
+        const existingUser = await User.findOne({ email: email.toLowerCase() });
+        if (existingUser) {
+            return res.status(400).json({ error: 'Un utilisateur avec cet e-mail existe déjà.' });
+        }
+        
+        // 2. Vérifier les licences
+        const formateurCount = await User.countDocuments({ organisation: organisation._id, role: 'formateur' });
+        if (formateurCount >= organisation.licences_max) {
+             return res.status(403).json({ error: "La limite de formateurs pour votre centre a été atteinte." });
+        }
+
+        // 3. Créer le token et l'invitation
+        const token = crypto.randomBytes(32).toString('hex');
+        const invitation = new Invitation({
+            email: email.toLowerCase(),
+            organisation: organisation._id,
+            token: token
+        });
+        await invitation.save();
+
+        // 4. Envoyer l'e-mail (Simulation)
+        const inviteLink = `http://localhost:${PORT}/auth.html?invitation_token=${token}`;
+        
+        console.log('--- SIMULATION D\'ENVOI D\'EMAIL ---');
+        console.log(`À: ${email}`);
+        console.log(`De: EIdos <ne-pas-repondre@eidos.fr>`);
+        console.log(`Sujet: Vous avez été invité à rejoindre ${organisation.name} sur EIdos`);
+        console.log(`Corps: ... cliquez sur ce lien pour créer votre compte formateur : ${inviteLink}`);
+        console.log('-----------------------------------');
+        
+        // VRAI ENVOI D'EMAIL (décommenter et configurer)
+        /*
+        await transporter.sendMail({
+            from: '"EIdos" <ne-pas-repondre@eidos.fr>',
+            to: email,
+            subject: `Vous avez été invité à rejoindre ${organisation.name} sur EIdos`,
+            html: `<p>Bonjour,</p>
+                   <p>Vous avez été invité par ${req.user.email} à rejoindre l'espace formateur de "${organisation.name}" sur EIdos.</p>
+                   <p>Cliquez sur le lien suivant pour créer votre compte :</p>
+                   <a href="${inviteLink}">Créer mon compte formateur</a>
+                   <p>Ce lien expirera dans 7 jours.</p>`
+        });
+        */
+
+        res.status(200).json({ success: true, message: `Invitation envoyée à ${email}.` });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST /api/organisation/remove (Pour retirer un FORMATEUR)
+app.post('/api/organisation/remove', protect, async (req, res) => {
+    if (!req.user.is_owner || !req.user.organisation) {
+        return res.status(403).json({ error: 'Non autorisé (réservé aux propriétaires de centre).' });
+    }
+
+    try {
+        const { email } = req.body;
+        
+        const formateur = await User.findOne({
+            email: email.toLowerCase(),
+            organisation: req.user.organisation._id,
+            is_owner: false // On ne peut pas se retirer soi-même
+        });
+        
+        if (!formateur) {
+            return res.status(404).json({ error: 'Formateur non trouvé dans votre organisation.' });
+        }
+
+        // Détache le formateur
+        formateur.organisation = null;
+        formateur.role = 'user';
+        formateur.subscription = 'free'; // Le rétrograde au plan 'free'
+        await formateur.save();
+
+        res.status(200).json({ success: true, message: `${email} a été retiré de votre centre.` });
 
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -502,7 +777,7 @@ app.post('/api/account/change-subscription', protect, async (req, res) => {
 
 // --- ROUTES DE L'API (Protégées) ---
 
-// GET /api/patients (Inchangé)
+// GET /api/patients (MODIFIÉ : Utilise effectivePlan)
 app.get('/api/patients', protect, async (req, res) => {
     try {
         const query = { user: req.user.resourceId };
@@ -521,9 +796,9 @@ app.get('/api/patients', protect, async (req, res) => {
     }
 });
 
-// POST /api/patients/save (MODIFIÉ : Ajout de la limite de sauvegarde)
+// POST /api/patients/save (MODIFIÉ : Utilise effectivePlan pour les limites)
 app.post('/api/patients/save', protect, async (req, res) => {
-    if (req.user.role === 'etudiant' || req.user.subscription === 'free') {
+    if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
 
@@ -541,7 +816,7 @@ app.post('/api/patients/save', protect, async (req, res) => {
         });
 
         if (existingSave) {
-            // L'utilisateur met à jour une sauvegarde existante, pas de vérification de limite.
+            // L'utilisateur met à jour une sauvegarde existante
             await Patient.updateOne(
                 { _id: existingSave._id },
                 { dossierData: dossierData }
@@ -549,12 +824,11 @@ app.post('/api/patients/save', protect, async (req, res) => {
             res.json({ success: true, message: 'Sauvegarde mise à jour.' });
         } else {
             // =================================================================
-            // DÉBUT DE LA MODIFICATION : Vérification de la limite de sauvegarde
+            // Vérification de la limite de sauvegarde
             // =================================================================
-            const subscription = req.user.subscription;
+            const plan = req.user.effectivePlan;
             
-            // Le plan 'centre' n'a pas de limite
-            if (subscription === 'independant' || subscription === 'promo') {
+            if (plan === 'independant' || plan === 'promo') {
                 
                 const saveCount = await Patient.countDocuments({
                     user: req.user.resourceId,
@@ -562,20 +836,19 @@ app.post('/api/patients/save', protect, async (req, res) => {
                 });
 
                 let limit = 0;
-                if (subscription === 'independant') limit = 20;
-                if (subscription === 'promo') limit = 50;
+                if (plan === 'independant') limit = 20;
+                if (plan === 'promo') limit = 50;
 
                 if (saveCount >= limit) {
                     return res.status(403).json({ 
-                        error: `Limite de ${limit} archives atteinte pour le plan ${subscription}.` 
+                        error: `Limite de ${limit} archives atteinte pour le plan ${plan}.` 
                     });
                 }
             }
-            // =================================================================
-            // FIN DE LA MODIFICATION
+            // Le plan 'centre' n'a pas de limite
             // =================================================================
 
-            // Si la limite n'est pas atteinte (ou si c'est 'centre'), on crée la sauvegarde.
+            // Si la limite n'est pas atteinte, on crée la sauvegarde.
             const newPatientId = `save_${new mongoose.Types.ObjectId()}`;
             const newPatient = new Patient({
                 patientId: newPatientId,
@@ -592,11 +865,13 @@ app.post('/api/patients/save', protect, async (req, res) => {
 });
 
 
-// GET /api/patients/:patientId (MODIFIÉ : Simplification, suppression de la vérification 'free' ici)
+// GET /api/patients/:patientId (MODIFIÉ : Simplifié)
 app.get('/api/patients/:patientId', protect, async (req, res) => {
+    // Si l'utilisateur est 'free', le frontend (app.js) ne devrait pas faire cet appel
+    // Mais s'il le fait, la logique de sauvegarde (POST) l'empêchera d'enregistrer.
+    // La lecture d'un dossier vide est autorisée.
+    
     try {
-        // La logique 'free' sera gérée par le frontend (app.js)
-        
         let patient = await Patient.findOne({ 
             patientId: req.params.patientId,
             user: req.user.resourceId
@@ -619,10 +894,13 @@ app.get('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
-// POST /api/patients/:patientId (MODIFIÉ : Simplification, suppression de la vérification 'free' ici)
+// POST /api/patients/:patientId (MODIFIÉ : Simplifié, utilise effectivePlan)
 app.post('/api/patients/:patientId', protect, async (req, res) => {
     try {
-        // La logique 'free' sera gérée par le frontend (app.js)
+        // Le plan 'free' ne peut pas sauvegarder
+        if (req.user.effectivePlan === 'free') {
+             return res.status(403).json({ error: 'Le plan Free ne permet pas la sauvegarde.' });
+        }
         
         if (!req.params.patientId.startsWith('chambre_')) {
             return res.status(400).json({ error: 'Cette route est réservée à la mise à jour des chambres.' });
@@ -632,6 +910,7 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
         const userIdToSave = req.user.resourceId;
         let finalDossierData = dossierData;
 
+        // Si c'est un étudiant, on fusionne les données en fonction des permissions
         if (req.user.role === 'etudiant') {
             const permissions = req.user.permissions;
             
@@ -643,40 +922,30 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             
             const mergedData = { ...existingData };
 
+            // Logique de fusion (simplifiée)
             if (permissions.header) {
-                Object.keys(dossierData).forEach(key => {
-                    if (key.startsWith('patient-') || key === 'admin-nom-usage' || key === 'admin-prenom' || key === 'admin-dob') {
-                        mergedData[key] = dossierData[key];
-                    }
+                ['patient-nom-usage', 'patient-prenom', 'patient-dob', 'patient-motif', 'patient-entry-date'].forEach(k => {
+                    if (dossierData[k] !== undefined) mergedData[k] = dossierData[k];
                 });
             }
             if (permissions.admin) {
-                Object.keys(dossierData).forEach(key => {
-                    if (key.startsWith('admin-')) {
-                        mergedData[key] = dossierData[key];
-                    }
-                });
+                Object.keys(dossierData).filter(k => k.startsWith('admin-')).forEach(k => mergedData[k] = dossierData[k]);
             }
             if (permissions.vie) {
-                Object.keys(dossierData).forEach(key => {
-                    if (key.startsWith('vie-') || key.startsWith('atcd-')) {
-                        mergedData[key] = dossierData[key];
-                    }
-                });
+                 Object.keys(dossierData).filter(k => k.startsWith('vie-') || k.startsWith('atcd-')).forEach(k => mergedData[k] = dossierData[k]);
             }
             if (permissions.observations) {
-                mergedData['observations-list_html'] = dossierData['observations-list_html'];
+                mergedData['observations'] = dossierData['observations'];
             }
-            
             if (permissions.prescriptions_add || permissions.prescriptions_delete || permissions.prescriptions_validate) {
                 mergedData['prescriptions'] = dossierData['prescriptions'];
             }
-            
             if (permissions.transmissions) {
-                mergedData['transmissions-list-ide_html'] = dossierData['transmissions-list-ide_html'];
+                mergedData['transmissions'] = dossierData['transmissions'];
             }
             if (permissions.pancarte) {
                 mergedData['pancarte'] = dossierData['pancarte'];
+                mergedData['glycemie'] = dossierData['glycemie']; // La pancarte inclut la glycémie
             }
             if (permissions.diagramme) {
                 mergedData['care-diagram-tbody_html'] = dossierData['care-diagram-tbody_html'];
@@ -689,11 +958,11 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             finalDossierData = mergedData;
         }
 
-
         await Patient.findOneAndUpdate(
             { patientId: req.params.patientId, user: userIdToSave }, 
             { 
                 dossierData: finalDossierData, 
+                // Seuls les non-étudiants peuvent changer le nom dans la sidebar
                 ...(req.user.role !== 'etudiant' && { sidebar_patient_name: sidebar_patient_name }),
                 user: userIdToSave 
             }, 
@@ -706,11 +975,10 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
-// DELETE /api/patients/:patientId (MODIFIÉ : Simplification, suppression de la vérification 'free' ici)
+// DELETE /api/patients/:patientId (MODIFIÉ : Utilise effectivePlan)
 app.delete('/api/patients/:patientId', protect, async (req, res) => {
-    // La logique 'free' sera gérée par le frontend (app.js)
     
-    if (req.user.role === 'etudiant') {
+    if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
 
@@ -719,6 +987,7 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
         const userId = req.user.resourceId;
 
         if (patientId.startsWith('chambre_')) {
+            // Réinitialise une chambre (efface les données)
             await Patient.findOneAndUpdate(
                 { patientId: patientId, user: userId },
                 { 
@@ -730,6 +999,7 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
             res.json({ success: true, message: 'Chambre réinitialisée.' });
 
         } else if (patientId.startsWith('save_')) {
+            // Supprime une sauvegarde (archive)
             await Patient.deleteOne({ 
                 patientId: patientId, 
                 user: userId 
@@ -743,7 +1013,55 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
-// SUPPRIMÉ : La route "Catch-all" app.get('/*') a été retirée
+// NOUVEAU : Webhook pour le paiement
+// Cette route doit être EXCLUE de votre middleware 'protect'
+// Elle doit être appelée par votre service de paiement (ex: Stripe)
+app.post('/api/webhook/payment-received', express.raw({type: 'application/json'}), async (req, res) => {
+    // const sig = req.headers['stripe-signature'];
+    // const event = stripe.webhooks.constructEvent(req.body, sig, "votre_secret_webhook_stripe");
+    
+    // --- SIMULATION (à remplacer par la vraie logique webhook) ---
+    console.log("Événement Webhook reçu (Simulation) !");
+    // const session = event.data.object;
+    // const organisationId = session.client_reference_id; // (Si vous l'avez défini lors de la création du lien)
+    // --- FIN SIMULATION ---
+    
+    try {
+        // --- VRAIE LOGIQUE ---
+        // 1. Trouver l'organisation (ex: par un ID stocké dans les métadonnées de Stripe)
+        // const organisation = await Organisation.findById(organisationId);
+        
+        // 2. Mettre à jour l'organisation
+        // if (organisation) {
+        //     organisation.is_active = true;
+        //     organisation.quote_url = null; // Efface le lien de devis
+        //     organisation.quote_price = null;
+        //     await organisation.save();
+        //     console.log(`Organisation ${organisation.name} activée avec succès !`);
+        // } else {
+        //     console.error(`Webhook reçu mais organisation non trouvée (ID: ${organisationId})`);
+        // }
+        
+        res.json({ received: true });
+
+    } catch (err) {
+        console.error("Erreur Webhook:", err.message);
+        res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+});
+
+
+// AJOUTÉ : Route "Catch-all" pour servir index.html
+// Doit être APRÈS les routes API et AVANT le démarrage du serveur
+app.get('/*', (req, res) => {
+    // Si le fichier demandé n'est pas trouvé par express.static (ex: /simul.html, /account.html)
+    // on renvoie index.html pour que le routing frontend prenne le relais.
+    // MAIS, vos fichiers sont servis statiquement.
+    // Cette route sert de fallback si l'utilisateur tape une URL inconnue.
+    // On va plutôt renvoyer la page principale (auth.html ou index.html)
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
 
 // --- DÉMARRAGE DU SERVEUR ---
 mongoose.connect(MONGO_URI)
