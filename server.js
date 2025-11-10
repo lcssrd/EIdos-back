@@ -4,13 +4,15 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-const crypto = require('crypto'); // Nécessaire pour les tokens d'invitation
+const crypto = require('crypto'); // Nécessaire pour les tokens
 const nodemailer = require('nodemailer'); // Nécessaire pour envoyer les e-mails
 
 // --- CONFIGURATION ---
 const app = express();
 app.use(cors()); 
 app.use(express.json());
+
+// Les lignes app.use(express.static(...)) et app.get('/*') ont été supprimées comme demandé.
 
 const PORT = process.env.PORT || 3000;
 const MONGO_URI = "mongodb+srv://lucasseraudie_db_user:9AnBALAG30WhZ3Ce@eidos.lelleaw.mongodb.net/?appName=EIdos"; // Assurez-vous que c'est la bonne
@@ -27,7 +29,7 @@ const transporter = nodemailer.createTransport({
     }
 });
 
-console.log("Pour voir les e-mails d'invitation de test, allez sur : https://ethereal.email/login");
+console.log("Pour voir les e-mails de test, allez sur : https://ethereal.email/login");
 
 
 // --- MODÈLES DE DONNÉES (SCHEMAS) ---
@@ -92,7 +94,12 @@ const userSchema = new mongoose.Schema({
 
     // --- Données spécifiques aux étudiants ---
     permissions: { type: mongoose.Schema.Types.Mixed, default: {} },
-    allowedRooms: { type: [String], default: [] } 
+    allowedRooms: { type: [String], default: [] },
+    
+    // --- NOUVEAU : Champs pour le changement d'e-mail ---
+    newEmail: { type: String, lowercase: true, default: null },
+    newEmailToken: { type: String, default: null },
+    newEmailTokenExpires: { type: Date, default: null }
 });
 const User = mongoose.model('User', userSchema);
 // --- FIN MODIFICATION SCHÉMA USER ---
@@ -340,7 +347,8 @@ app.post('/auth/login', async (req, res) => {
             return res.status(401).json({ error: 'Identifiants invalides' });
         }
         
-        if (user.role === 'user' && !user.isVerified) {
+        // Seuls les 'user' et 'owner' ont besoin de vérifier leur e-mail pour se connecter
+        if ((user.role === 'user' || user.role === 'owner') && !user.isVerified) {
             return res.status(401).json({ error: 'Veuillez d\'abord vérifier votre email.' });
         }
         
@@ -432,6 +440,102 @@ app.post('/api/account/change-password', protect, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+// --- NOUVEAU : ROUTES POUR LE CHANGEMENT D'EMAIL ---
+
+// POST /api/account/request-change-email
+app.post('/api/account/request-change-email', protect, async (req, res) => {
+    try {
+        const { newEmail, password } = req.body;
+        const user = req.user;
+
+        // 1. Vérifier le mot de passe
+        const isMatch = await bcrypt.compare(password, user.passwordHash);
+        if (!isMatch) {
+            return res.status(400).json({ error: 'Mot de passe actuel incorrect.' });
+        }
+
+        // 2. Vérifier si le nouvel email est déjà pris
+        const existingUser = await User.findOne({ email: newEmail.toLowerCase() });
+        if (existingUser) {
+            return res.status(400).json({ error: 'Cette adresse e-mail est déjà utilisée.' });
+        }
+        
+        // 3. Générer un token de vérification
+        const token = crypto.randomBytes(32).toString('hex');
+        
+        user.newEmail = newEmail.toLowerCase();
+        user.newEmailToken = token;
+        user.newEmailTokenExpires = Date.now() + 3600000; // Valide 1 heure
+        await user.save();
+
+        // 4. Envoyer l'email de vérification (Simulation)
+        const verifyLink = `http://localhost:${PORT}/api/account/verify-change-email?token=${token}`;
+        
+        console.log('--- SIMULATION D\'ENVOI D\'EMAIL DE CHANGEMENT ---');
+        console.log(`À: ${newEmail}`);
+        console.log(`Sujet: Confirmez votre nouvelle adresse e-mail EIdos`);
+        console.log(`Corps: ... cliquez sur ce lien pour confirmer : ${verifyLink}`);
+        console.log('-----------------------------------');
+        
+        // VRAI ENVOI D'EMAIL (décommenter et configurer)
+        /*
+        await transporter.sendMail({
+            from: '"EIdos" <ne-pas-repondre@eidos.fr>',
+            to: newEmail,
+            subject: 'Confirmez votre nouvelle adresse e-mail EIdos',
+            html: `<p>Bonjour,</p>
+                   <p>Vous avez demandé à changer votre adresse e-mail pour ${newEmail}.</p>
+                   <p>Cliquez sur le lien suivant pour confirmer ce changement :</p>
+                   <a href="${verifyLink}">Confirmer ma nouvelle adresse</a>
+                   <p>Ce lien expirera dans 1 heure.</p>`
+        });
+        */
+        
+        res.json({ success: true, message: `Un e-mail de vérification a été envoyé à ${newEmail}.` });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// GET /api/account/verify-change-email
+// Note : Pas de middleware 'protect' ici, car l'utilisateur clique depuis son e-mail
+app.get('/api/account/verify-change-email', async (req, res) => {
+    try {
+        const { token } = req.query;
+        if (!token) {
+            return res.status(400).send('Token manquant.');
+        }
+
+        const user = await User.findOne({
+            newEmailToken: token,
+            newEmailTokenExpires: { $gt: Date.now() } // $gt = greater than
+        });
+
+        if (!user) {
+            return res.status(400).send('<h1>Erreur</h1><p>Ce lien est invalide ou a expiré.</p>');
+        }
+
+        // Succès ! On met à jour l'email
+        user.email = user.newEmail;
+        user.newEmail = null;
+        user.newEmailToken = null;
+        user.newEmailTokenExpires = null;
+        await user.save();
+        
+        // Redirige l'utilisateur vers la page de compte avec un message de succès
+        // (Une page HTML simple est souvent préférable)
+        res.send('<h1>Succès !</h1><p>Votre adresse e-mail a été mise à jour. Vous pouvez fermer cet onglet et vous reconnecter.</p>');
+
+    } catch (err) {
+        res.status(500).send('<h1>Erreur</h1><p>Une erreur est survenue.</p>');
+    }
+});
+
+
+// --- FIN DES ROUTES DE CHANGEMENT D'EMAIL ---
 
 // DELETE /api/account/delete (MODIFIÉ : Gère la suppression d'organisation)
 app.delete('/api/account/delete', protect, async (req, res) => {
@@ -1049,7 +1153,6 @@ app.post('/api/webhook/payment-received', express.raw({type: 'application/json'}
 });
 
 
-
 // --- DÉMARRAGE DU SERVEUR ---
 mongoose.connect(MONGO_URI)
     .then(() => {
@@ -1061,6 +1164,4 @@ mongoose.connect(MONGO_URI)
     .catch((err) => {
         console.error('❌ Erreur de connexion à MongoDB :', err);
         process.exit(1);
-
     });
-
