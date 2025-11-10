@@ -14,9 +14,10 @@ app.use(express.json());
 
 // Les lignes app.use(express.static(...)) et app.get('/*') ont été supprimées comme demandé.
 
-const PORT = process.env.PORT || 3000;
-const MONGO_URI = "mongodb+srv://lucasseraudie_db_user:9AnBALAG30WhZ3Ce@eidos.lelleaw.mongodb.net/?appName=EIdos"; // Assurez-vous que c'est la bonne
-const JWT_SECRET = "mettez_une_phrase_secrete_tres_longue_ici"; // !! CHANGEZ CECI EN PRODUCTION !!
+// Les lignes ont été supprimés pour la sécurité
+// const PORT = process.env.PORT || 3000;
+// const MONGO_URI = "mongodb+srv://lucasseraudie_db_user:9AnBALAG30WhZ3Ce@eidos.lelleaw.mongodb.net/?appName=EIdos"; // Assurez-vous que c'est la bonne
+// const JWT_SECRET = "mettez_une_phrase_secrete_tres_longue_ici"; // !! CHANGEZ CECI EN PRODUCTION !!
 
 // --- CONFIGURATION SIMULÉE DE NODEMAILER ---
 // (Remplacez par vos vrais identifiants de service d'e-mail, ex: SendGrid, Mailgun, ou un compte Gmail/SMTP)
@@ -1165,3 +1166,4 @@ mongoose.connect(MONGO_URI)
         console.error('❌ Erreur de connexion à MongoDB :', err);
         process.exit(1);
     });
+
