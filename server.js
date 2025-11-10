@@ -12,8 +12,6 @@ const app = express();
 app.use(cors()); 
 app.use(express.json());
 
-app.use(express.static(path.join(__dirname)));
-
 const PORT = process.env.PORT || 3000;
 const MONGO_URI = "mongodb+srv://lucasseraudie_db_user:9AnBALAG30WhZ3Ce@eidos.lelleaw.mongodb.net/?appName=EIdos"; // Assurez-vous que c'est la bonne
 const JWT_SECRET = "mettez_une_phrase_secrete_tres_longue_ici"; // !! CHANGEZ CECI EN PRODUCTION !!
@@ -1074,4 +1072,5 @@ mongoose.connect(MONGO_URI)
     .catch((err) => {
         console.error('❌ Erreur de connexion à MongoDB :', err);
         process.exit(1);
+
     });
