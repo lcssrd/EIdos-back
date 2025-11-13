@@ -851,7 +851,7 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
 // POST /api/organisation/remove (Inchangé)
 app.post('/api/organisation/remove', protect, async (req, res) => {
     if (!req.user.is_owner || !req.user.organisation) {
-        return res.status(4G3).json({ error: 'Non autorisé (réservé aux propriétaires de centre).' });
+        return res.status(403).json({ error: 'Non autorisé (réservé aux propriétaires de centre).' });
     }
 
     try {
