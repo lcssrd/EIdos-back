@@ -14,8 +14,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^7.0.0",
     "mongoose": "^8.19.3",
-    "nodemailer": "^6.9.14",
-    "socket.io": "^4.7.5"
+    "nodemailer": "^6.9.14"
   },
   "engines": {
     "node": "18.x"
