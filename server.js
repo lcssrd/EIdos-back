@@ -171,7 +171,7 @@ const protect = async (req, res, next) => {
     }
 };
 
-// --- AUTHENTIFICATION ET LOGIQUE WEBSOCKET --- AJOUTÉ
+// --- AUTHENTIFICATION ET LOGIQUE WEBSOCKET ---
 io.use(async (socket, next) => {
     // Middleware d'authentification pour Socket.io
     const token = socket.handshake.auth.token;
@@ -229,6 +229,7 @@ io.on('connection', (socket) => {
 
 
 // --- ROUTES D'AUTHENTIFICATION (Inchangées) ---
+// ... (POST /auth/signup, POST /auth/verify, POST /auth/login, GET /api/auth/me) ...
 // POST /auth/signup (Inchangé)
 app.post('/auth/signup', async (req, res) => {
     try {
@@ -427,8 +428,9 @@ app.get('/api/auth/me', protect, async (req, res) => {
     });
 });
 
+
 // --- ROUTES DE GESTION DE COMPTE (Inchangées) ---
-// (GET /api/account/details, POST /api/account/change-password, etc. restent identiques)
+// ... (GET /api/account/details, POST /api/account/change-password, etc.) ...
 // GET /api/account/details (MODIFIÉ : Gère les rôles)
 app.get('/api/account/details', protect, async (req, res) => {
     if (req.user.role === 'etudiant') {
@@ -796,6 +798,7 @@ app.post('/api/account/change-subscription', protect, async (req, res) => {
 
 
 // --- ROUTES D'ORGANISATION (Inchangées) ---
+// ... (POST /api/organisation/invite, POST /api/organisation/remove) ...
 // POST /api/organisation/invite (Inchangé)
 app.post('/api/organisation/invite', protect, async (req, res) => {
     if (!req.user.is_owner || !req.user.organisation) {
@@ -848,7 +851,7 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
 // POST /api/organisation/remove (Inchangé)
 app.post('/api/organisation/remove', protect, async (req, res) => {
     if (!req.user.is_owner || !req.user.organisation) {
-        return res.status(403).json({ error: 'Non autorisé (réservé aux propriétaires de centre).' });
+        return res.status(4G3).json({ error: 'Non autorisé (réservé aux propriétaires de centre).' });
     }
 
     try {
@@ -1061,16 +1064,12 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
         
-        // --- AJOUT : DIFFUSION SOCKET.IO ---
-        // On récupère l'instance 'io' stockée dans l'app
+        // --- CORRECTION : AJOUT DE LA LIGNE DE DIFFUSION MANQUANTE ---
         const io = req.app.get('io'); 
-        // On construit le nom de la room (basé sur le propriétaire du dossier)
         const roomName = `dossier_${userIdToSave}_${req.params.patientId}`;
-        
-        // On émet à tous les membres de la room, SAUF à l'expéditeur (socket.broadcast)
-        // L'expéditeur (celui qui a sauvegardé) n'a pas besoin de recevoir ses propres modifs
+        // On émet à tous les membres de la room
         io.to(roomName).emit('dossier_updated', finalDossierData);
-        // --- FIN AJOUT ---
+        // --- FIN DE LA CORRECTION ---
         
         res.json({ success: true, message: 'Dossier de chambre mis à jour.' });
     } catch (err) {
@@ -1078,7 +1077,7 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
-// DELETE /api/patients/:patientId (Inchangé)
+// DELETE /api/patients/:patientId (MODIFIÉ POUR SOCKET.IO)
 app.delete('/api/patients/:patientId', protect, async (req, res) => {
     
     if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') {
@@ -1099,12 +1098,11 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
                 { upsert: true, new: true }
             );
             
-            // --- AJOUT : DIFFUSION SOCKET.IO ---
-            // On informe aussi les autres que le dossier a été réinitialisé
+            // --- CORRECTION : AJOUT DE LA LIGNE DE DIFFUSION MANQUANTE ---
             const io = req.app.get('io'); 
             const roomName = `dossier_${userId}_${patientId}`;
-            io.to(roomName).emit('dossier_updated', {}); // On envoie un dossier vide
-            // --- FIN AJOUT ---
+            io.to(roomName).emit('dossier_updated', {}); // Envoie un dossier vide
+            // --- FIN DE LA CORRECTION ---
 
             res.json({ success: true, message: 'Chambre réinitialisée.' });
 
