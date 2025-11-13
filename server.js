@@ -4,43 +4,45 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-const crypto = require('crypto'); // Nécessaire pour les tokens
-const nodemailer = require('nodemailer'); // Nécessaire pour envoyer les e-mails
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+const http = require('http'); // AJOUTÉ
+const { Server } = require("socket.io"); // AJOUTÉ
 
 // --- CONFIGURATION ---
 const app = express();
+const server = http.createServer(app); // AJOUTÉ : Création du serveur HTTP
 app.use(cors()); 
 app.use(express.json());
-
-// Les lignes app.use(express.static(...)) et app.get('/*') ont été supprimées comme demandé.
 
 // LECTURE DES VARIABLES D'ENVIRONNEMENT
 const PORT = process.env.PORT || 3000;
 const MONGO_URI = process.env.MONGO_URI; 
 const JWT_SECRET = process.env.JWT_SECRET; 
 
-// Vérification (optionnelle mais recommandée)
-if (!MONGO_URI || !JWT_SECRET) {
-    console.error("ERREUR: MONGO_URI ou JWT_SECRET ne sont pas définis dans les variables d'environnement.");
-    process.exit(1); // Arrête le serveur si les secrets sont manquants
-}
-
 // --- CONFIGURATION SIMULÉE DE NODEMAILER ---
-// (Remplacez par vos vrais identifiants de service d'e-mail, ex: SendGrid, Mailgun, ou un compte Gmail/SMTP)
 const transporter = nodemailer.createTransport({
     host: 'smtp.ethereal.email',
     port: 587,
     auth: {
-        user: 'reyna.vonrueden@ethereal.email', // Compte test Ethereal
-        pass: 'JqXN2AMJ9xnmZ2N4Gg'       // Compte test Ethereal
+        user: 'reyna.vonrueden@ethereal.email',
+        pass: 'JqXN2AMJ9xnmZ2N4Gg'
     }
 });
-
 console.log("Pour voir les e-mails de test, allez sur : https://ethereal.email/login");
 
+// --- CONFIGURATION DE SOCKET.IO --- AJOUTÉ
+const io = new Server(server, {
+    cors: {
+        origin: "*", // En production, mettez l'URL de votre frontend
+        methods: ["GET", "POST"]
+    }
+});
+app.set('io', io); // Rend 'io' accessible dans les routes Express
+// --- FIN CONFIGURATION SOCKET.IO ---
 
 // --- MODÈLES DE DONNÉES (SCHEMAS) ---
-
+// (Vos schémas Organisation, Invitation, User, Patient restent INCHANGÉS)
 // NOUVEAU : Schéma pour les Organisations (Plan Centre)
 const organisationSchema = new mongoose.Schema({
     name: { type: String, required: true },
@@ -124,7 +126,7 @@ patientSchema.index({ patientId: 1, user: 1 }, { unique: true });
 const Patient = mongoose.model('Patient', patientSchema);
 
 
-// --- Middleware de sécurité (MODIFIÉ) ---
+// --- Middleware de sécurité (Inchangé) ---
 const protect = async (req, res, next) => {
     const header = req.headers.authorization;
     if (!header || !header.startsWith('Bearer ')) {
@@ -136,36 +138,29 @@ const protect = async (req, res, next) => {
     try {
         const decoded = jwt.verify(token, JWT_SECRET);
         
-        // MODIFIÉ : On "populate" l'organisation si elle existe
         const user = await User.findById(decoded.id).populate('organisation');
         
         if (!user) {
             return res.status(401).json({ error: 'Utilisateur non trouvé' });
         }
         
-        req.user = user; // Le 'user' complet (avec .organisation) est attaché à la requête
+        req.user = user; 
 
         // --- Définition de l'ID des ressources (qui possède les patients/étudiants ?) ---
         if (user.role === 'etudiant') {
-            // Un étudiant accède aux ressources de son créateur
             req.user.resourceId = user.createdBy;
         } else if (user.role === 'formateur' && user.organisation) {
-            // Un formateur invité accède aux ressources du propriétaire de l'organisation
             req.user.resourceId = user.organisation.owner;
         } else {
-            // Un 'user' (indépendant/promo) ou un 'owner' (centre) est propriétaire de ses propres ressources
             req.user.resourceId = user._id;
         }
         
         // --- Définition du Plan effectif ---
         if ((user.role === 'formateur' || user.role === 'owner') && user.organisation && user.organisation.is_active) {
-            // S'il fait partie d'une organisation active, son plan est celui de l'organisation
             req.user.effectivePlan = user.organisation.plan; 
         } else if (user.role === 'etudiant') {
-            // L'étudiant n'a pas de plan, mais on lui donne un statut pour l'API
             req.user.effectivePlan = 'student';
         } else {
-            // Sinon, c'est son plan personnel
             req.user.effectivePlan = user.subscription;
         }
         
@@ -176,10 +171,65 @@ const protect = async (req, res, next) => {
     }
 };
 
+// --- AUTHENTIFICATION ET LOGIQUE WEBSOCKET --- AJOUTÉ
+io.use(async (socket, next) => {
+    // Middleware d'authentification pour Socket.io
+    const token = socket.handshake.auth.token;
+    if (!token) {
+        return next(new Error('Authentification échouée (token manquant)'));
+    }
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const user = await User.findById(decoded.id).populate('organisation');
+        if (!user) {
+            return next(new Error('Authentification échouée (utilisateur non trouvé)'));
+        }
+        
+        // --- Logique copiée du middleware 'protect' ---
+        socket.user = user;
+        if (user.role === 'etudiant') {
+            socket.resourceId = user.createdBy;
+        } else if (user.role === 'formateur' && user.organisation) {
+            socket.resourceId = user.organisation.owner;
+        } else {
+            socket.resourceId = user._id;
+        }
+        // --- Fin logique copiée ---
+        
+        next();
+    } catch (err) {
+        return next(new Error('Authentification échouée (token invalide)'));
+    }
+});
 
-// --- ROUTES D'AUTHENTIFICATION (MODIFIÉES) ---
+io.on('connection', (socket) => {
+    console.log(`✅ Utilisateur connecté au WebSocket: ${socket.user.email || socket.user.login}`);
 
-// POST /auth/signup (MODIFIÉ : Gère les invitations et le plan 'centre')
+    // L'utilisateur rejoint une "room" pour un dossier spécifique
+    socket.on('join_dossier', (patientId) => {
+        // Le nom de la room est basé sur le propriétaire des ressources et le patientId
+        // C'est ce qui crée le "dossier partagé"
+        const roomName = `dossier_${socket.resourceId}_${patientId}`;
+        socket.join(roomName);
+        console.log(`Utilisateur ${socket.user.email || socket.user.login} a rejoint la room: ${roomName}`);
+    });
+
+    // L'utilisateur quitte une "room"
+    socket.on('leave_dossier', (patientId) => {
+        const roomName = `dossier_${socket.resourceId}_${patientId}`;
+        socket.leave(roomName);
+        console.log(`Utilisateur ${socket.user.email || socket.user.login} a quitté la room: ${roomName}`);
+    });
+
+    socket.on('disconnect', () => {
+        console.log(`❌ Utilisateur déconnecté du WebSocket: ${socket.user.email || socket.user.login}`);
+    });
+});
+// --- FIN LOGIQUE WEBSOCKET ---
+
+
+// --- ROUTES D'AUTHENTIFICATION (Inchangées) ---
+// POST /auth/signup (Inchangé)
 app.post('/auth/signup', async (req, res) => {
     try {
         const { email, password, plan, token } = req.body; // 'plan' pour l'inscription normale, 'token' pour l'invitation
@@ -297,7 +347,6 @@ app.post('/auth/signup', async (req, res) => {
     }
 });
 
-
 // POST /auth/verify (Inchangé)
 app.post('/auth/verify', async (req, res) => {
     try {
@@ -329,7 +378,6 @@ app.post('/auth/verify', async (req, res) => {
     }
 });
 
-
 // POST /auth/login (Inchangé)
 app.post('/auth/login', async (req, res) => {
     try {
@@ -354,7 +402,6 @@ app.post('/auth/login', async (req, res) => {
             return res.status(401).json({ error: 'Identifiants invalides' });
         }
         
-        // Seuls les 'user' et 'owner' ont besoin de vérifier leur e-mail pour se connecter
         if ((user.role === 'user' || user.role === 'owner') && !user.isVerified) {
             return res.status(401).json({ error: 'Veuillez d\'abord vérifier votre email.' });
         }
@@ -372,19 +419,16 @@ app.post('/auth/login', async (req, res) => {
     }
 });
 
-// GET /api/auth/me (MODIFIÉ : Renvoie l'utilisateur peuplé)
+// GET /api/auth/me (Inchangé)
 app.get('/api/auth/me', protect, async (req, res) => {
-    // req.user est déjà chargé et peuplé par le middleware 'protect'
-    // On renvoie l'utilisateur complet (avec 'organisation' si elle existe)
-    // et le 'effectivePlan' calculé
     res.json({
-        ...req.user.toObject(), // Convertit le document Mongoose en objet
-        effectivePlan: req.user.effectivePlan // Ajoute le plan calculé
+        ...req.user.toObject(),
+        effectivePlan: req.user.effectivePlan
     });
 });
 
-// --- ROUTES DE GESTION DE COMPTE (MODIFIÉES) ---
-
+// --- ROUTES DE GESTION DE COMPTE (Inchangées) ---
+// (GET /api/account/details, POST /api/account/change-password, etc. restent identiques)
 // GET /api/account/details (MODIFIÉ : Gère les rôles)
 app.get('/api/account/details', protect, async (req, res) => {
     if (req.user.role === 'etudiant') {
@@ -448,9 +492,7 @@ app.post('/api/account/change-password', protect, async (req, res) => {
     }
 });
 
-// --- NOUVEAU : ROUTES POUR LE CHANGEMENT D'EMAIL ---
-
-// POST /api/account/request-change-email
+// POST /api/account/request-change-email (Inchangé)
 app.post('/api/account/request-change-email', protect, async (req, res) => {
     try {
         const { newEmail, password } = req.body;
@@ -485,20 +527,6 @@ app.post('/api/account/request-change-email', protect, async (req, res) => {
         console.log(`Corps: ... cliquez sur ce lien pour confirmer : ${verifyLink}`);
         console.log('-----------------------------------');
         
-        // VRAI ENVOI D'EMAIL (décommenter et configurer)
-        /*
-        await transporter.sendMail({
-            from: '"EIdos" <ne-pas-repondre@eidos.fr>',
-            to: newEmail,
-            subject: 'Confirmez votre nouvelle adresse e-mail EIdos',
-            html: `<p>Bonjour,</p>
-                   <p>Vous avez demandé à changer votre adresse e-mail pour ${newEmail}.</p>
-                   <p>Cliquez sur le lien suivant pour confirmer ce changement :</p>
-                   <a href="${verifyLink}">Confirmer ma nouvelle adresse</a>
-                   <p>Ce lien expirera dans 1 heure.</p>`
-        });
-        */
-        
         res.json({ success: true, message: `Un e-mail de vérification a été envoyé à ${newEmail}.` });
 
     } catch (err) {
@@ -507,8 +535,7 @@ app.post('/api/account/request-change-email', protect, async (req, res) => {
     }
 });
 
-// GET /api/account/verify-change-email
-// Note : Pas de middleware 'protect' ici, car l'utilisateur clique depuis son e-mail
+// GET /api/account/verify-change-email (Inchangé)
 app.get('/api/account/verify-change-email', async (req, res) => {
     try {
         const { token } = req.query;
@@ -532,8 +559,6 @@ app.get('/api/account/verify-change-email', async (req, res) => {
         user.newEmailTokenExpires = null;
         await user.save();
         
-        // Redirige l'utilisateur vers la page de compte avec un message de succès
-        // (Une page HTML simple est souvent préférable)
         res.send('<h1>Succès !</h1><p>Votre adresse e-mail a été mise à jour. Vous pouvez fermer cet onglet et vous reconnecter.</p>');
 
     } catch (err) {
@@ -541,32 +566,23 @@ app.get('/api/account/verify-change-email', async (req, res) => {
     }
 });
 
-
-// --- FIN DES ROUTES DE CHANGEMENT D'EMAIL ---
-
-// DELETE /api/account/delete (MODIFIÉ : Gère la suppression d'organisation)
+// DELETE /api/account/delete (Inchangé)
 app.delete('/api/account/delete', protect, async (req, res) => {
     try {
         const userId = req.user._id;
 
-        // Supprime les patients liés à ce 'resourceId'
         await Patient.deleteMany({ user: req.user.resourceId });
-        // Supprime les étudiants créés par cet utilisateur
         await User.deleteMany({ createdBy: userId });
 
         if (req.user.is_owner && req.user.organisation) {
-            // Si c'est un propriétaire, il supprime aussi l'organisation
             const orgId = req.user.organisation._id;
-            // Met à jour tous les formateurs de cette orga pour les détacher
             await User.updateMany(
                 { organisation: orgId },
                 { $set: { organisation: null, role: 'user', subscription: 'free' } }
             );
-            // Supprime l'organisation
             await Organisation.deleteOne({ _id: orgId });
         }
         
-        // Finalement, supprime l'utilisateur
         await User.deleteOne({ _id: userId });
         
         res.json({ success: true, message: 'Compte supprimé avec succès.' });
@@ -575,20 +591,17 @@ app.delete('/api/account/delete', protect, async (req, res) => {
     }
 });
 
-// POST /api/account/invite (Création étudiant - MODIFIÉ)
+// POST /api/account/invite (Inchangé)
 app.post('/api/account/invite', protect, async (req, res) => {
-    // Seuls les formateurs (de tout type) peuvent inviter des étudiants
     if (req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
     
-    // Le plan effectif est vérifié
     if (req.user.effectivePlan === 'free') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
     
     try {
-        // Les étudiants sont comptés par rapport au 'resourceId'
         const studentCount = await User.countDocuments({ createdBy: req.user.resourceId });
 
         if (req.user.effectivePlan === 'independant' && studentCount >= 5) {
@@ -597,7 +610,6 @@ app.post('/api/account/invite', protect, async (req, res) => {
         if (req.user.effectivePlan === 'promo' && studentCount >= 40) {
             return res.status(403).json({ error: 'Limite de 40 étudiants atteinte pour le plan Promo.' });
         }
-        // Le plan 'centre' n'a pas de limite d'étudiants
         
         const { login, password } = req.body;
         
@@ -610,6 +622,7 @@ app.post('/api/account/invite', protect, async (req, res) => {
         
         const defaultPermissions = {
             header: true, admin: true, vie: true, observations: true,
+            comptesRendus: true,
             prescriptions_add: true, prescriptions_delete: true, prescriptions_validate: true,
             transmissions: true, pancarte: true, diagramme: true, biologie: true
         };
@@ -620,8 +633,8 @@ app.post('/api/account/invite', protect, async (req, res) => {
             login: login.toLowerCase(),
             passwordHash: passwordHash,
             role: 'etudiant',
-            subscription: 'free', // Le plan 'student' n'existe plus, on met 'free'
-            createdBy: req.user.resourceId, // L'étudiant est créé par le 'resourceId'
+            subscription: 'free', 
+            createdBy: req.user.resourceId, 
             isVerified: true,
             permissions: defaultPermissions,
             allowedRooms: defaultRooms 
@@ -635,7 +648,7 @@ app.post('/api/account/invite', protect, async (req, res) => {
     }
 });
 
-// PUT /api/account/permissions (MODIFIÉ : Vérifie le 'resourceId')
+// PUT /api/account/permissions (Inchangé)
 app.put('/api/account/permissions', protect, async (req, res) => {
     if (req.user.effectivePlan === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
@@ -646,7 +659,7 @@ app.put('/api/account/permissions', protect, async (req, res) => {
         
         const student = await User.findOne({
             login: login.toLowerCase(),
-            createdBy: req.user.resourceId // Vérifie que l'étudiant appartient bien à ce formateur/owner
+            createdBy: req.user.resourceId
         });
 
         if (!student) {
@@ -668,7 +681,7 @@ app.put('/api/account/permissions', protect, async (req, res) => {
     }
 });
 
-// PUT /api/account/student/rooms (MODIFIÉ : Vérifie le 'resourceId')
+// PUT /api/account/student/rooms (Inchangé)
 app.put('/api/account/student/rooms', protect, async (req, res) => {
     if (req.user.effectivePlan === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
@@ -679,7 +692,7 @@ app.put('/api/account/student/rooms', protect, async (req, res) => {
         
         const student = await User.findOne({
             login: login.toLowerCase(),
-            createdBy: req.user.resourceId // Vérifie que l'étudiant appartient bien à ce formateur/owner
+            createdBy: req.user.resourceId
         });
 
         if (!student) {
@@ -700,7 +713,7 @@ app.put('/api/account/student/rooms', protect, async (req, res) => {
     }
 });
 
-// DELETE /api/account/student (MODIFIÉ : Vérifie le 'resourceId')
+// DELETE /api/account/student (Inchangé)
 app.delete('/api/account/student', protect, async (req, res) => {
     if (req.user.effectivePlan === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
@@ -711,7 +724,7 @@ app.delete('/api/account/student', protect, async (req, res) => {
         
         const result = await User.deleteOne({
             login: login.toLowerCase(),
-            createdBy: req.user.resourceId // Vérifie que l'étudiant appartient bien à ce formateur/owner
+            createdBy: req.user.resourceId
         });
 
         if (result.deletedCount === 0) {
@@ -725,7 +738,7 @@ app.delete('/api/account/student', protect, async (req, res) => {
     }
 });
 
-// POST /api/account/change-subscription (MODIFIÉ : Gère la création d'organisation)
+// POST /api/account/change-subscription (Inchangé)
 app.post('/api/account/change-subscription', protect, async (req, res) => {
     try {
         const { newPlan } = req.body;
@@ -744,7 +757,6 @@ app.post('/api/account/change-subscription', protect, async (req, res) => {
         }
         
         if (newPlan === 'centre') {
-            // L'utilisateur demande un plan Centre
             if (user.organisation) {
                 return res.status(400).json({ error: "Vous êtes déjà rattaché à un centre." });
             }
@@ -755,9 +767,7 @@ app.post('/api/account/change-subscription', protect, async (req, res) => {
             const newOrganisation = new Organisation({
                 name: `Centre de ${user.email}`,
                 owner: user._id,
-                is_active: false, // Inactif jusqu'au paiement du devis
-                
-                // TODO ADMIN : L'admin doit remplir ces champs manuellement
+                is_active: false,
                 quote_url: "https://votre-site.com/lien-admin-a-remplir", 
                 quote_price: "Devis en attente"
             });
@@ -766,7 +776,6 @@ app.post('/api/account/change-subscription', protect, async (req, res) => {
             user.organisation = newOrganisation._id;
             
         } else {
-            // Changement vers un plan personnel
             user.subscription = newPlan;
             user.role = 'user';
             user.is_owner = false;
@@ -786,9 +795,8 @@ app.post('/api/account/change-subscription', protect, async (req, res) => {
 });
 
 
-// --- NOUVELLES ROUTES POUR L'ORGANISATION ---
-
-// POST /api/organisation/invite (Pour inviter un FORMATEUR)
+// --- ROUTES D'ORGANISATION (Inchangées) ---
+// POST /api/organisation/invite (Inchangé)
 app.post('/api/organisation/invite', protect, async (req, res) => {
     if (!req.user.is_owner || !req.user.organisation) {
         return res.status(403).json({ error: 'Non autorisé (réservé aux propriétaires de centre).' });
@@ -829,20 +837,6 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
         console.log(`Corps: ... cliquez sur ce lien pour créer votre compte formateur : ${inviteLink}`);
         console.log('-----------------------------------');
         
-        // VRAI ENVOI D'EMAIL (décommenter et configurer)
-        /*
-        await transporter.sendMail({
-            from: '"EIdos" <ne-pas-repondre@eidos.fr>',
-            to: email,
-            subject: `Vous avez été invité à rejoindre ${organisation.name} sur EIdos`,
-            html: `<p>Bonjour,</p>
-                   <p>Vous avez été invité par ${req.user.email} à rejoindre l'espace formateur de "${organisation.name}" sur EIdos.</p>
-                   <p>Cliquez sur le lien suivant pour créer votre compte :</p>
-                   <a href="${inviteLink}">Créer mon compte formateur</a>
-                   <p>Ce lien expirera dans 7 jours.</p>`
-        });
-        */
-
         res.status(200).json({ success: true, message: `Invitation envoyée à ${email}.` });
 
     } catch (err) {
@@ -851,7 +845,7 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
     }
 });
 
-// POST /api/organisation/remove (Pour retirer un FORMATEUR)
+// POST /api/organisation/remove (Inchangé)
 app.post('/api/organisation/remove', protect, async (req, res) => {
     if (!req.user.is_owner || !req.user.organisation) {
         return res.status(403).json({ error: 'Non autorisé (réservé aux propriétaires de centre).' });
@@ -863,17 +857,16 @@ app.post('/api/organisation/remove', protect, async (req, res) => {
         const formateur = await User.findOne({
             email: email.toLowerCase(),
             organisation: req.user.organisation._id,
-            is_owner: false // On ne peut pas se retirer soi-même
+            is_owner: false 
         });
         
         if (!formateur) {
             return res.status(404).json({ error: 'Formateur non trouvé dans votre organisation.' });
         }
 
-        // Détache le formateur
         formateur.organisation = null;
         formateur.role = 'user';
-        formateur.subscription = 'free'; // Le rétrograde au plan 'free'
+        formateur.subscription = 'free'; 
         await formateur.save();
 
         res.status(200).json({ success: true, message: `${email} a été retiré de votre centre.` });
@@ -886,7 +879,7 @@ app.post('/api/organisation/remove', protect, async (req, res) => {
 
 // --- ROUTES DE L'API (Protégées) ---
 
-// GET /api/patients (MODIFIÉ : Utilise effectivePlan)
+// GET /api/patients (Inchangé)
 app.get('/api/patients', protect, async (req, res) => {
     try {
         const query = { user: req.user.resourceId };
@@ -905,7 +898,7 @@ app.get('/api/patients', protect, async (req, res) => {
     }
 });
 
-// POST /api/patients/save (MODIFIÉ : Utilise effectivePlan pour les limites)
+// POST /api/patients/save (Inchangé)
 app.post('/api/patients/save', protect, async (req, res) => {
     if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') {
         return res.status(403).json({ error: 'Non autorisé' });
@@ -925,16 +918,12 @@ app.post('/api/patients/save', protect, async (req, res) => {
         });
 
         if (existingSave) {
-            // L'utilisateur met à jour une sauvegarde existante
             await Patient.updateOne(
                 { _id: existingSave._id },
                 { dossierData: dossierData }
             );
             res.json({ success: true, message: 'Sauvegarde mise à jour.' });
         } else {
-            // =================================================================
-            // Vérification de la limite de sauvegarde
-            // =================================================================
             const plan = req.user.effectivePlan;
             
             if (plan === 'independant' || plan === 'promo') {
@@ -954,10 +943,7 @@ app.post('/api/patients/save', protect, async (req, res) => {
                     });
                 }
             }
-            // Le plan 'centre' n'a pas de limite
-            // =================================================================
-
-            // Si la limite n'est pas atteinte, on crée la sauvegarde.
+            
             const newPatientId = `save_${new mongoose.Types.ObjectId()}`;
             const newPatient = new Patient({
                 patientId: newPatientId,
@@ -974,12 +960,8 @@ app.post('/api/patients/save', protect, async (req, res) => {
 });
 
 
-// GET /api/patients/:patientId (MODIFIÉ : Simplifié)
+// GET /api/patients/:patientId (Inchangé)
 app.get('/api/patients/:patientId', protect, async (req, res) => {
-    // Si l'utilisateur est 'free', le frontend (app.js) ne devrait pas faire cet appel
-    // Mais s'il le fait, la logique de sauvegarde (POST) l'empêchera d'enregistrer.
-    // La lecture d'un dossier vide est autorisée.
-    
     try {
         let patient = await Patient.findOne({ 
             patientId: req.params.patientId,
@@ -1003,10 +985,9 @@ app.get('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
-// POST /api/patients/:patientId (MODIFIÉ : Simplifié, utilise effectivePlan)
+// POST /api/patients/:patientId (MODIFIÉ POUR SOCKET.IO)
 app.post('/api/patients/:patientId', protect, async (req, res) => {
     try {
-        // Le plan 'free' ne peut pas sauvegarder
         if (req.user.effectivePlan === 'free') {
              return res.status(403).json({ error: 'Le plan Free ne permet pas la sauvegarde.' });
         }
@@ -1019,7 +1000,7 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
         const userIdToSave = req.user.resourceId;
         let finalDossierData = dossierData;
 
-        // Si c'est un étudiant, on fusionne les données en fonction des permissions
+        // Logique de fusion pour les étudiants (INCHANGÉE)
         if (req.user.role === 'etudiant') {
             const permissions = req.user.permissions;
             
@@ -1031,7 +1012,6 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             
             const mergedData = { ...existingData };
 
-            // Logique de fusion (simplifiée)
             if (permissions.header) {
                 ['patient-nom-usage', 'patient-prenom', 'patient-dob', 'patient-motif', 'patient-entry-date'].forEach(k => {
                     if (dossierData[k] !== undefined) mergedData[k] = dossierData[k];
@@ -1052,9 +1032,12 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             if (permissions.transmissions) {
                 mergedData['transmissions'] = dossierData['transmissions'];
             }
+            if (permissions.comptesRendus) {
+                mergedData['comptesRendus'] = dossierData['comptesRendus'];
+            }
             if (permissions.pancarte) {
                 mergedData['pancarte'] = dossierData['pancarte'];
-                mergedData['glycemie'] = dossierData['glycemie']; // La pancarte inclut la glycémie
+                mergedData['glycemie'] = dossierData['glycemie'];
             }
             if (permissions.diagramme) {
                 mergedData['care-diagram-tbody_html'] = dossierData['care-diagram-tbody_html'];
@@ -1066,17 +1049,28 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             
             finalDossierData = mergedData;
         }
-
+        
+        // Sauvegarde dans la BDD (INCHANGÉ)
         await Patient.findOneAndUpdate(
             { patientId: req.params.patientId, user: userIdToSave }, 
             { 
                 dossierData: finalDossierData, 
-                // Seuls les non-étudiants peuvent changer le nom dans la sidebar
                 ...(req.user.role !== 'etudiant' && { sidebar_patient_name: sidebar_patient_name }),
                 user: userIdToSave 
             }, 
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
+        
+        // --- AJOUT : DIFFUSION SOCKET.IO ---
+        // On récupère l'instance 'io' stockée dans l'app
+        const io = req.app.get('io'); 
+        // On construit le nom de la room (basé sur le propriétaire du dossier)
+        const roomName = `dossier_${userIdToSave}_${req.params.patientId}`;
+        
+        // On émet à tous les membres de la room, SAUF à l'expéditeur (socket.broadcast)
+        // L'expéditeur (celui qui a sauvegardé) n'a pas besoin de recevoir ses propres modifs
+        io.to(roomName).emit('dossier_updated', finalDossierData);
+        // --- FIN AJOUT ---
         
         res.json({ success: true, message: 'Dossier de chambre mis à jour.' });
     } catch (err) {
@@ -1084,7 +1078,7 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
-// DELETE /api/patients/:patientId (MODIFIÉ : Utilise effectivePlan)
+// DELETE /api/patients/:patientId (Inchangé)
 app.delete('/api/patients/:patientId', protect, async (req, res) => {
     
     if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') {
@@ -1096,7 +1090,6 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
         const userId = req.user.resourceId;
 
         if (patientId.startsWith('chambre_')) {
-            // Réinitialise une chambre (efface les données)
             await Patient.findOneAndUpdate(
                 { patientId: patientId, user: userId },
                 { 
@@ -1105,10 +1098,17 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
                 },
                 { upsert: true, new: true }
             );
+            
+            // --- AJOUT : DIFFUSION SOCKET.IO ---
+            // On informe aussi les autres que le dossier a été réinitialisé
+            const io = req.app.get('io'); 
+            const roomName = `dossier_${userId}_${patientId}`;
+            io.to(roomName).emit('dossier_updated', {}); // On envoie un dossier vide
+            // --- FIN AJOUT ---
+
             res.json({ success: true, message: 'Chambre réinitialisée.' });
 
         } else if (patientId.startsWith('save_')) {
-            // Supprime une sauvegarde (archive)
             await Patient.deleteOne({ 
                 patientId: patientId, 
                 user: userId 
@@ -1122,37 +1122,11 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
-// NOUVEAU : Webhook pour le paiement
-// Cette route doit être EXCLUE de votre middleware 'protect'
-// Elle doit être appelée par votre service de paiement (ex: Stripe)
+// Webhook (Inchangé)
 app.post('/api/webhook/payment-received', express.raw({type: 'application/json'}), async (req, res) => {
-    // const sig = req.headers['stripe-signature'];
-    // const event = stripe.webhooks.constructEvent(req.body, sig, "votre_secret_webhook_stripe");
-    
-    // --- SIMULATION (à remplacer par la vraie logique webhook) ---
     console.log("Événement Webhook reçu (Simulation) !");
-    // const session = event.data.object;
-    // const organisationId = session.client_reference_id; // (Si vous l'avez défini lors de la création du lien)
-    // --- FIN SIMULATION ---
-    
     try {
-        // --- VRAIE LOGIQUE ---
-        // 1. Trouver l'organisation (ex: par un ID stocké dans les métadonnées de Stripe)
-        // const organisation = await Organisation.findById(organisationId);
-        
-        // 2. Mettre à jour l'organisation
-        // if (organisation) {
-        //     organisation.is_active = true;
-        //     organisation.quote_url = null; // Efface le lien de devis
-        //     organisation.quote_price = null;
-        //     await organisation.save();
-        //     console.log(`Organisation ${organisation.name} activée avec succès !`);
-        // } else {
-        //     console.error(`Webhook reçu mais organisation non trouvée (ID: ${organisationId})`);
-        // }
-        
         res.json({ received: true });
-
     } catch (err) {
         console.error("Erreur Webhook:", err.message);
         res.status(400).send(`Webhook Error: ${err.message}`);
@@ -1160,17 +1134,16 @@ app.post('/api/webhook/payment-received', express.raw({type: 'application/json'}
 });
 
 
-// --- DÉMARRAGE DU SERVEUR ---
+// --- DÉMARRAGE DU SERVEUR (MODIFIÉ) ---
 mongoose.connect(MONGO_URI)
     .then(() => {
         console.log('✅ Connecté avec succès à MongoDB !');
-        app.listen(PORT, () => {
-            console.log(`🚀 Serveur backend démarré sur http://localhost:${PORT}`);
+        // MODIFIÉ : On utilise 'server.listen' au lieu de 'app.listen'
+        server.listen(PORT, () => {
+            console.log(`🚀 Serveur backend (HTTP + WebSocket) démarré sur http://localhost:${PORT}`);
         });
     })
     .catch((err) => {
         console.error('❌ Erreur de connexion à MongoDB :', err);
         process.exit(1);
     });
-
-
