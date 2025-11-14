@@ -78,8 +78,8 @@ const userSchema = new mongoose.Schema({
     // Plan personnel (pour 'user')
     subscription: { 
         type: String, 
-        enum: ['free', 'independant', 'promo'], 
-        default: 'free' 
+        enum: ['free', 'independant', 'promo', null], 
+        default: null 
     },
 
     // --- LIENS ---
@@ -215,7 +215,7 @@ app.post('/auth/signup', async (req, res) => {
                 passwordHash,
                 isVerified: true, // L'invitation par e-mail vaut vérification
                 role: 'formateur',
-                subscription: 'free', // Le plan perso est 'free', il hérite du plan 'centre'
+                subscription: null, // Le plan perso est 'free', il hérite du plan 'centre'
                 organisation: invitation.organisation._id,
                 is_owner: false
             });
@@ -239,7 +239,7 @@ app.post('/auth/signup', async (req, res) => {
                     confirmationCode,
                     isVerified: false,
                     role: 'owner', // Il est propriétaire
-                    subscription: 'free', // Son plan perso est 'free'
+                    subscription: null, // Son plan perso est 'free'
                     is_owner: true
                 });
                 await newUser.save(); // Sauve l'utilisateur d'abord pour avoir un _id
@@ -616,7 +616,7 @@ app.post('/api/account/invite', protect, async (req, res) => {
             login: login.toLowerCase(),
             passwordHash: passwordHash,
             role: 'etudiant',
-            subscription: 'free', // Le plan 'student' n'existe plus, on met 'free'
+            subscription: null, // Le plan 'student' n'existe plus, on met 'free'
             createdBy: req.user.resourceId, // L'étudiant est créé par le 'resourceId'
             isVerified: true,
             permissions: defaultPermissions,
