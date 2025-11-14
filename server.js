@@ -1037,12 +1037,27 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
                     if (dossierData[k] !== undefined) mergedData[k] = dossierData[k];
                 });
                 
-                // NOUVELLE LOGIQUE : L'étudiant peut mettre à jour le nom
-                // de la sidebar UNIQUEMENT s'il a la permission 'header'
+                // *** DEBUT DE LA CORRECTION ***
+                // Si le header est autorisé, on force la synchronisation
+                // des champs admin correspondants, peu importe la permission 'admin'.
+                const adminFieldsToSync = ['admin-nom-usage', 'admin-prenom', 'admin-dob'];
+                adminFieldsToSync.forEach(adminKey => {
+                    const patientKey = adminKey.replace('admin-', 'patient-'); // 'admin-nom-usage' -> 'patient-nom-usage'
+                    if (dossierData[patientKey] !== undefined) {
+                        mergedData[adminKey] = dossierData[patientKey];
+                    }
+                });
+                // *** FIN DE LA CORRECTION ***
+                
                 sidebarUpdate = { sidebar_patient_name: sidebar_patient_name };
             }
+            
             if (permissions.admin) {
-                Object.keys(dossierData).filter(k => k.startsWith('admin-')).forEach(k => mergedData[k] = dossierData[k]);
+                // MODIFICATION : Ne pas retraiter les champs déjà synchronisés
+                const adminFieldsToSync = ['admin-nom-usage', 'admin-prenom', 'admin-dob'];
+                Object.keys(dossierData).filter(k => 
+                    k.startsWith('admin-') && !adminFieldsToSync.includes(k)
+                ).forEach(k => mergedData[k] = dossierData[k]);
             }
             if (permissions.vie) {
                  Object.keys(dossierData).filter(k => k.startsWith('vie-') || k.startsWith('atcd-')).forEach(k => mergedData[k] = dossierData[k]);
