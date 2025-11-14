@@ -1003,7 +1003,8 @@ app.get('/api/patients/:patientId', protect, async (req, res) => {
 app.post('/api/patients/:patientId', protect, async (req, res) => {
     try {
         // Le plan 'free' ne peut pas sauvegarder
-        if (req.user.effectivePlan === 'free') {
+        // MODIFICATION : Correction de la logique (identique à celle que vous avez demandée précédemment)
+        if (req.user.effectivePlan === 'free' && req.user.role !== 'etudiant') {
              return res.status(403).json({ error: 'Le plan Free ne permet pas la sauvegarde.' });
         }
         
@@ -1014,6 +1015,9 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
         const { dossierData, sidebar_patient_name } = req.body;
         const userIdToSave = req.user.resourceId;
         let finalDossierData = dossierData;
+        
+        // NOUVEAU : Initialiser l'objet de mise à jour de la sidebar
+        let sidebarUpdate = {};
 
         // Si c'est un étudiant, on fusionne les données en fonction des permissions
         if (req.user.role === 'etudiant') {
@@ -1032,6 +1036,10 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
                 ['patient-nom-usage', 'patient-prenom', 'patient-dob', 'patient-motif', 'patient-entry-date'].forEach(k => {
                     if (dossierData[k] !== undefined) mergedData[k] = dossierData[k];
                 });
+                
+                // NOUVELLE LOGIQUE : L'étudiant peut mettre à jour le nom
+                // de la sidebar UNIQUEMENT s'il a la permission 'header'
+                sidebarUpdate = { sidebar_patient_name: sidebar_patient_name };
             }
             if (permissions.admin) {
                 Object.keys(dossierData).filter(k => k.startsWith('admin-')).forEach(k => mergedData[k] = dossierData[k]);
@@ -1048,7 +1056,6 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             if (permissions.transmissions) {
                 mergedData['transmissions'] = dossierData['transmissions'];
             }
-            // MODIFICATION : Ajout de la logique de fusion pour les comptes rendus
             if (permissions.comptesRendus) {
                 mergedData['comptesRendus'] = dossierData['comptesRendus'];
             }
@@ -1065,14 +1072,17 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             }
             
             finalDossierData = mergedData;
+        } else {
+            // Le formateur/owner peut toujours mettre à jour le nom
+            sidebarUpdate = { sidebar_patient_name: sidebar_patient_name };
         }
 
         await Patient.findOneAndUpdate(
             { patientId: req.params.patientId, user: userIdToSave }, 
             { 
                 dossierData: finalDossierData, 
-                // Seuls les non-étudiants peuvent changer le nom dans la sidebar
-                ...(req.user.role !== 'etudiant' && { sidebar_patient_name: sidebar_patient_name }),
+                // MODIFICATION : Utilisation de l'objet dynamique
+                ...sidebarUpdate,
                 user: userIdToSave 
             }, 
             { upsert: true, new: true, setDefaultsOnInsert: true }
