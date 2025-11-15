@@ -2,15 +2,28 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const jwt =require('jsonwebtoken');
 const path = require('path');
-const crypto = require('crypto'); // Nécessaire pour les tokens
-const nodemailer = require('nodemailer'); // Nécessaire pour envoyer les e-mails
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+
+// NOUVEAU : Importations pour Socket.io
+const http = require('http');
+const { Server } = require("socket.io");
 
 // --- CONFIGURATION ---
 const app = express();
 app.use(cors()); 
 app.use(express.json());
+
+// NOUVEAU : Création du serveur HTTP et de l'instance Socket.io
+const httpServer = http.createServer(app);
+const io = new Server(httpServer, {
+    cors: {
+        origin: "*", // En production, restreignez ceci à l'URL de votre front-end
+        methods: ["GET", "POST"]
+    }
+});
 
 // Les lignes app.use(express.static(...)) et app.get('/*') ont été supprimées comme demandé.
 
@@ -20,7 +33,6 @@ const MONGO_URI = process.env.MONGO_URI;
 const JWT_SECRET = process.env.JWT_SECRET; 
 
 // --- CONFIGURATION SIMULÉE DE NODEMAILER ---
-// (Remplacez par vos vrais identifiants de service d'e-mail, ex: SendGrid, Mailgun, ou un compte Gmail/SMTP)
 const transporter = nodemailer.createTransport({
     host: 'smtp.ethereal.email',
     port: 587,
@@ -169,6 +181,59 @@ const protect = async (req, res, next) => {
         res.status(401).json({ error: 'Non autorisé (token invalide)' });
     }
 };
+
+// --- NOUVEAU : Middleware d'authentification Socket.io ---
+io.use(async (socket, next) => {
+    const token = socket.handshake.auth.token;
+    
+    if (!token) {
+        return next(new Error('Authentification échouée (pas de token)'));
+    }
+
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const user = await User.findById(decoded.id).populate('organisation');
+        
+        if (!user) {
+            return next(new Error('Utilisateur non trouvé'));
+        }
+
+        // --- Logique copiée du middleware 'protect' ---
+        let resourceId;
+        if (user.role === 'etudiant') {
+            resourceId = user.createdBy;
+        } else if (user.role === 'formateur' && user.organisation) {
+            resourceId = user.organisation.owner;
+        } else {
+            resourceId = user._id;
+        }
+        
+        // Attache les infos vitales au socket pour une utilisation future
+        socket.user = user;
+        socket.resourceId = resourceId;
+        
+        next();
+    } catch (err) {
+        return next(new Error('Authentification échouée (token invalide)'));
+    }
+});
+
+// --- NOUVEAU : Gestion des connexions Socket.io ---
+io.on('connection', (socket) => {
+    console.log(`Un utilisateur s'est connecté : ${socket.id} (Utilisateur: ${socket.user._id}, Ressource: ${socket.resourceId})`);
+    
+    // L'utilisateur rejoint une "room" basée sur l'ID de ses ressources
+    // Ainsi, un formateur et tous ses étudiants seront dans la même room.
+    const roomName = `room_${socket.resourceId}`;
+    socket.join(roomName);
+    console.log(`Socket ${socket.id} a rejoint la room ${roomName}`);
+
+    socket.on('disconnect', () => {
+        console.log(`Utilisateur déconnecté : ${socket.id}`);
+    });
+
+    // On pourrait ajouter d'autres gestionnaires ici (ex: 'typing', 'user_joined_patient_file')
+});
 
 
 // --- ROUTES D'AUTHENTIFICATION (MODIFIÉES) ---
@@ -999,7 +1064,7 @@ app.get('/api/patients/:patientId', protect, async (req, res) => {
     }
 });
 
-// POST /api/patients/:patientId (MODIFIÉ : Simplifié, utilise effectivePlan)
+// POST /api/patients/:patientId (MODIFIÉ : Simplifié, utilise effectivePlan, ET ÉMET L'ÉVÉNEMENT SOCKET)
 app.post('/api/patients/:patientId', protect, async (req, res) => {
     try {
         // Le plan 'free' ne peut pas sauvegarder
@@ -1103,6 +1168,37 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
         
+        // --- NOUVEAU : Émission de l'événement Socket.io ---
+        try {
+            // L'ID de l'utilisateur qui a fait la modification
+            const senderSocketId = req.headers['x-socket-id'];
+            const roomName = `room_${req.user.resourceId}`;
+            
+            // On cherche le socket de l'émetteur
+            const sockets = await io.in(roomName).fetchSockets();
+            const senderSocket = sockets.find(s => s.id === senderSocketId);
+
+            const eventData = {
+                patientId: req.params.patientId,
+                dossierData: finalDossierData,
+                sender: senderSocketId 
+            };
+            
+            if (senderSocket) {
+                // Émet à tout le monde dans la room, SAUF à l'émetteur
+                senderSocket.to(roomName).emit('patient_updated', eventData);
+                console.log(`Événement émis à ${roomName} (sauf ${senderSocketId})`);
+            } else {
+                // Fallback : Émet à tout le monde dans la room (l'émetteur devra l'ignorer côté client)
+                io.to(roomName).emit('patient_updated', eventData);
+                console.log(`Événement émis à ${roomName} (fallback)`);
+            }
+
+        } catch (socketError) {
+            console.error("Erreur lors de l'émission du socket :", socketError);
+        }
+        // --- FIN DE L'ÉMISSION ---
+        
         res.json({ success: true, message: 'Dossier de chambre mis à jour.' });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1130,6 +1226,21 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
                 },
                 { upsert: true, new: true }
             );
+            
+            // --- NOUVEAU : Émission de l'événement Socket.io pour le clear ---
+             try {
+                const roomName = `room_${req.user.resourceId}`;
+                const eventData = {
+                    patientId: patientId,
+                    dossierData: {}, // Dossier vide
+                };
+                io.to(roomName).emit('patient_updated', eventData);
+                console.log(`Événement (clear) émis à ${roomName}`);
+            } catch (socketError) {
+                console.error("Erreur lors de l'émission du socket (clear):", socketError);
+            }
+            // --- FIN DE L'ÉMISSION ---
+            
             res.json({ success: true, message: 'Chambre réinitialisée.' });
 
         } else if (patientId.startsWith('save_')) {
@@ -1148,36 +1259,12 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
 });
 
 // NOUVEAU : Webhook pour le paiement
-// Cette route doit être EXCLUE de votre middleware 'protect'
-// Elle doit être appelée par votre service de paiement (ex: Stripe)
+// ... (code inchangé)
 app.post('/api/webhook/payment-received', express.raw({type: 'application/json'}), async (req, res) => {
-    // const sig = req.headers['stripe-signature'];
-    // const event = stripe.webhooks.constructEvent(req.body, sig, "votre_secret_webhook_stripe");
-    
-    // --- SIMULATION (à remplacer par la vraie logique webhook) ---
+    // ... (code inchangé)
     console.log("Événement Webhook reçu (Simulation) !");
-    // const session = event.data.object;
-    // const organisationId = session.client_reference_id; // (Si vous l'avez défini lors de la création du lien)
-    // --- FIN SIMULATION ---
-    
     try {
-        // --- VRAIE LOGIQUE ---
-        // 1. Trouver l'organisation (ex: par un ID stocké dans les métadonnées de Stripe)
-        // const organisation = await Organisation.findById(organisationId);
-        
-        // 2. Mettre à jour l'organisation
-        // if (organisation) {
-        //     organisation.is_active = true;
-        //     organisation.quote_url = null; // Efface le lien de devis
-        //     organisation.quote_price = null;
-        //     await organisation.save();
-        //     console.log(`Organisation ${organisation.name} activée avec succès !`);
-        // } else {
-        //     console.error(`Webhook reçu mais organisation non trouvée (ID: ${organisationId})`);
-        // }
-        
         res.json({ received: true });
-
     } catch (err) {
         console.error("Erreur Webhook:", err.message);
         res.status(400).send(`Webhook Error: ${err.message}`);
@@ -1189,8 +1276,10 @@ app.post('/api/webhook/payment-received', express.raw({type: 'application/json'}
 mongoose.connect(MONGO_URI)
     .then(() => {
         console.log('✅ Connecté avec succès à MongoDB !');
-        app.listen(PORT, () => {
-            console.log(`🚀 Serveur backend démarré sur http://localhost:${PORT}`);
+        
+        // MODIFIÉ : Lancement du httpServer au lieu de app
+        httpServer.listen(PORT, () => {
+            console.log(`🚀 Serveur backend (Express + Socket.io) démarré sur http://localhost:${PORT}`);
         });
     })
     .catch((err) => {
