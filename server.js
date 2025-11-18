@@ -2,38 +2,35 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const jwt =require('jsonwebtoken');
 const path = require('path');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-require('dotenv').config();
 
+// NOUVEAU : Importations pour Socket.io
+const http = require('http');
+const { Server } = require("socket.io");
+
+// --- CONFIGURATION ---
 const app = express();
-
-// --- CONFIGURATION DE SÉCURITÉ ---
-app.use(helmet());
-
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Limite chaque IP à 100 requêtes par fenêtre
-    standardHeaders: true,
-    legacyHeaders: false,
-});
-app.use(limiter);
-
-const corsOptions = {
-    origin: process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(',') : "*",
-    optionsSuccessStatus: 200
-};
-app.use(cors(corsOptions));
-
+app.use(cors()); 
 app.use(express.json());
 
+// NOUVEAU : Création du serveur HTTP et de l'instance Socket.io
+const httpServer = http.createServer(app);
+const io = new Server(httpServer, {
+    cors: {
+        origin: "*", // En production, restreignez ceci à l'URL de votre front-end
+        methods: ["GET", "POST"]
+    }
+});
+
+// Les lignes app.use(express.static(...)) et app.get('/*') ont été supprimées comme demandé.
+
+// LECTURE DES VARIABLES D'ENVIRONNEMENT
 const PORT = process.env.PORT || 3000;
-const MONGO_URI = process.env.MONGO_URI;
-const JWT_SECRET = process.env.JWT_SECRET;
+const MONGO_URI = process.env.MONGO_URI; 
+const JWT_SECRET = process.env.JWT_SECRET; 
 
 // --- CONFIGURATION SIMULÉE DE NODEMAILER ---
 const transporter = nodemailer.createTransport({
@@ -56,7 +53,7 @@ const organisationSchema = new mongoose.Schema({
     owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // Le 'Propriétaire'
     plan: { type: String, default: 'centre', enum: ['centre'] },
     licences_max: { type: Number, default: 50 }, // Le nombre de formateurs (sièges)
-
+    
     // Pour le paiement sur devis
     quote_url: { type: String, default: null }, // Le lien de paiement Stripe
     quote_price: { type: String, default: null }, // Le texte "2000€/an"
@@ -69,7 +66,7 @@ const invitationSchema = new mongoose.Schema({
     email: { type: String, required: true, lowercase: true, index: true },
     organisation: { type: mongoose.Schema.Types.ObjectId, ref: 'Organisation', required: true },
     token: { type: String, required: true, unique: true },
-    expires_at: { type: Date, default: () => Date.now() + 7 * 24 * 60 * 60 * 1000 } // Expire dans 7 jours
+    expires_at: { type: Date, default: () => Date.now() + 7*24*60*60*1000 } // Expire dans 7 jours
 });
 const Invitation = mongoose.model('Invitation', invitationSchema);
 
@@ -82,36 +79,36 @@ const userSchema = new mongoose.Schema({
     passwordHash: { type: String, required: true },
     isVerified: { type: Boolean, default: false },
     confirmationCode: { type: String },
-
+    
     // NOUVEAUX RÔLES
-    role: {
-        type: String,
+    role: { 
+        type: String, 
         enum: ['user', 'formateur', 'owner', 'etudiant'], // user = standard, owner = admin du centre, formateur = invité du centre
-        required: true
+        required: true 
     },
-
+    
     // Plan personnel (pour 'user')
-    subscription: {
-        type: String,
-        enum: ['free', 'independant', 'promo'],
-        default: 'free'
+    subscription: { 
+        type: String, 
+        enum: ['free', 'independant', 'promo'], 
+        default: 'free' 
     },
 
     // --- LIENS ---
-
+    
     // Si role='etudiant', ceci est l'ID du formateur/owner qui l'a créé
-    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }, 
+    
     // Si role='formateur' ou 'owner', ceci est l'ID de leur organisation
     organisation: { type: mongoose.Schema.Types.ObjectId, ref: 'Organisation', default: null },
-
+    
     // Pour différencier le payeur des invités dans une organisation
-    is_owner: { type: Boolean, default: false },
+    is_owner: { type: Boolean, default: false }, 
 
     // --- Données spécifiques aux étudiants ---
     permissions: { type: mongoose.Schema.Types.Mixed, default: {} },
     allowedRooms: { type: [String], default: [] },
-
+    
     // --- NOUVEAU : Champs pour le changement d'e-mail ---
     newEmail: { type: String, lowercase: true, default: null },
     newEmailToken: { type: String, default: null },
@@ -139,19 +136,19 @@ const protect = async (req, res, next) => {
     if (!header || !header.startsWith('Bearer ')) {
         return res.status(401).json({ error: 'Non autorisé (pas de token)' });
     }
-
-    const token = header.split(' ')[1];
+    
+    const token = header.split(' ')[1]; 
 
     try {
         const decoded = jwt.verify(token, JWT_SECRET);
-
+        
         // MODIFIÉ : On "populate" l'organisation si elle existe
         const user = await User.findById(decoded.id).populate('organisation');
-
+        
         if (!user) {
             return res.status(401).json({ error: 'Utilisateur non trouvé' });
         }
-
+        
         req.user = user; // Le 'user' complet (avec .organisation) est attaché à la requête
 
         // --- Définition de l'ID des ressources (qui possède les patients/étudiants ?) ---
@@ -165,11 +162,11 @@ const protect = async (req, res, next) => {
             // Un 'user' (indépendant/promo) ou un 'owner' (centre) est propriétaire de ses propres ressources
             req.user.resourceId = user._id;
         }
-
+        
         // --- Définition du Plan effectif ---
         if ((user.role === 'formateur' || user.role === 'owner') && user.organisation && user.organisation.is_active) {
             // S'il fait partie d'une organisation active, son plan est celui de l'organisation
-            req.user.effectivePlan = user.organisation.plan;
+            req.user.effectivePlan = user.organisation.plan; 
         } else if (user.role === 'etudiant') {
             // L'étudiant n'a pas de plan, mais on lui donne un statut pour l'API
             req.user.effectivePlan = 'student';
@@ -177,8 +174,8 @@ const protect = async (req, res, next) => {
             // Sinon, c'est son plan personnel
             req.user.effectivePlan = user.subscription;
         }
-
-        next();
+        
+        next(); 
     } catch (err) {
         console.error("Erreur Middleware Protect:", err);
         res.status(401).json({ error: 'Non autorisé (token invalide)' });
@@ -188,7 +185,7 @@ const protect = async (req, res, next) => {
 // --- NOUVEAU : Middleware d'authentification Socket.io ---
 io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
-
+    
     if (!token) {
         return next(new Error('Authentification échouée (pas de token)'));
     }
@@ -196,7 +193,7 @@ io.use(async (socket, next) => {
     try {
         const decoded = jwt.verify(token, JWT_SECRET);
         const user = await User.findById(decoded.id).populate('organisation');
-
+        
         if (!user) {
             return next(new Error('Utilisateur non trouvé'));
         }
@@ -210,11 +207,11 @@ io.use(async (socket, next) => {
         } else {
             resourceId = user._id;
         }
-
+        
         // Attache les infos vitales au socket pour une utilisation future
         socket.user = user;
         socket.resourceId = resourceId;
-
+        
         next();
     } catch (err) {
         return next(new Error('Authentification échouée (token invalide)'));
@@ -224,7 +221,7 @@ io.use(async (socket, next) => {
 // --- NOUVEAU : Gestion des connexions Socket.io ---
 io.on('connection', (socket) => {
     console.log(`Un utilisateur s'est connecté : ${socket.id} (Utilisateur: ${socket.user._id}, Ressource: ${socket.resourceId})`);
-
+    
     // L'utilisateur rejoint une "room" basée sur l'ID de ses ressources
     // Ainsi, un formateur et tous ses étudiants seront dans la même room.
     const roomName = `room_${socket.resourceId}`;
@@ -245,7 +242,7 @@ io.on('connection', (socket) => {
 app.post('/auth/signup', async (req, res) => {
     try {
         const { email, password, plan, token } = req.body; // 'plan' pour l'inscription normale, 'token' pour l'invitation
-
+        
         if (!email || !password) {
             return res.status(400).json({ error: 'Email et mot de passe requis' });
         }
@@ -254,7 +251,7 @@ app.post('/auth/signup', async (req, res) => {
         if (existingUser) {
             return res.status(400).json({ error: 'Cet email est déjà utilisé' });
         }
-
+        
         const passwordHash = await bcrypt.hash(password, 10);
         const confirmationCode = Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -263,23 +260,23 @@ app.post('/auth/signup', async (req, res) => {
         if (token) {
             // --- Logique d'invitation (l'utilisateur rejoint un Centre) ---
             const invitation = await Invitation.findOne({ token: token, email: email.toLowerCase() }).populate('organisation');
-
+            
             if (!invitation || invitation.expires_at < Date.now()) {
                 return res.status(400).json({ error: "Token d'invitation invalide ou expiré." });
             }
 
             // Compter les licences
-            const formateurCount = await User.countDocuments({
-                organisation: invitation.organisation._id,
-                role: 'formateur'
+            const formateurCount = await User.countDocuments({ 
+                organisation: invitation.organisation._id, 
+                role: 'formateur' 
             });
 
             if (formateurCount >= invitation.organisation.licences_max) {
-                return res.status(403).json({ error: "Le nombre maximum de formateurs pour ce centre a été atteint." });
+                 return res.status(403).json({ error: "Le nombre maximum de formateurs pour ce centre a été atteint." });
             }
 
-            newUser = new User({
-                email: email.toLowerCase(),
+            newUser = new User({ 
+                email: email.toLowerCase(), 
                 passwordHash,
                 isVerified: true, // L'invitation par e-mail vaut vérification
                 role: 'formateur',
@@ -287,7 +284,7 @@ app.post('/auth/signup', async (req, res) => {
                 organisation: invitation.organisation._id,
                 is_owner: false
             });
-
+            
             await newUser.save();
             await Invitation.deleteOne({ _id: invitation._id }); // Supprime le token
 
@@ -298,7 +295,7 @@ app.post('/auth/signup', async (req, res) => {
             if (plan && validPlans.includes(plan)) {
                 finalSubscription = plan;
             }
-
+            
             if (finalSubscription === 'centre') {
                 // L'utilisateur crée un plan Centre (il devient 'owner')
                 newUser = new User({
@@ -317,41 +314,41 @@ app.post('/auth/signup', async (req, res) => {
                     name: `Centre de ${email}`, // Nom par défaut
                     owner: newUser._id,
                     is_active: false, // Inactif jusqu'au paiement
-
+                    
                     // TODO ADMIN : L'admin doit remplir ces champs manuellement
-                    quote_url: "https://votre-site.com/lien-admin-a-remplir",
+                    quote_url: "https://votre-site.com/lien-admin-a-remplir", 
                     quote_price: "Devis en attente"
                 });
                 await newOrganisation.save();
-
+                
                 // Lie l'organisation à l'utilisateur
                 newUser.organisation = newOrganisation._id;
                 await newUser.save();
-
+                
             } else {
                 // Inscription standard (Free, Indep, Promo)
-                newUser = new User({
-                    email: email.toLowerCase(),
+                newUser = new User({ 
+                    email: email.toLowerCase(), 
                     passwordHash,
                     confirmationCode,
                     isVerified: false,
                     role: 'user', // Rôle 'user' standard
-                    subscription: finalSubscription
+                    subscription: finalSubscription 
                 });
                 await newUser.save();
             }
         }
-
+        
         // N'envoie un code de vérification que si ce n'est pas une invitation
         if (!token) {
             console.log(`CODE DE VÉRIFICATION pour ${email}: ${confirmationCode}`);
             // TODO : Envoyer le VRAI email de vérification
         }
-
-        res.status(201).json({
-            success: true,
+        
+        res.status(201).json({ 
+            success: true, 
             message: 'Utilisateur créé. Veuillez vérifier votre email.',
-            _test_code: token ? null : confirmationCode
+            _test_code: token ? null : confirmationCode 
         });
     } catch (err) {
         console.error(err);
@@ -367,7 +364,7 @@ app.post('/auth/verify', async (req, res) => {
         if (!email || !code) {
             return res.status(400).json({ error: 'Email et code requis' });
         }
-
+        
         const user = await User.findOne({ email: email.toLowerCase() });
 
         if (!user) {
@@ -396,7 +393,7 @@ app.post('/auth/verify', async (req, res) => {
 app.post('/auth/login', async (req, res) => {
     try {
         const { identifier, password } = req.body;
-
+        
         let user;
         const anID = identifier.toLowerCase();
 
@@ -415,16 +412,16 @@ app.post('/auth/login', async (req, res) => {
         if (!isMatch) {
             return res.status(401).json({ error: 'Identifiants invalides' });
         }
-
+        
         // Seuls les 'user' et 'owner' ont besoin de vérifier leur e-mail pour se connecter
         if ((user.role === 'user' || user.role === 'owner') && !user.isVerified) {
             return res.status(401).json({ error: 'Veuillez d\'abord vérifier votre email.' });
         }
-
+        
         const token = jwt.sign(
-            { id: user._id, role: user.role },
-            JWT_SECRET,
-            { expiresIn: '7d' }
+            { id: user._id, role: user.role }, 
+            JWT_SECRET,        
+            { expiresIn: '7d' } 
         );
 
         res.json({ success: true, token: token });
@@ -457,9 +454,9 @@ app.get('/api/account/details', protect, async (req, res) => {
         // resourceId est l'ID du propriétaire (pour owner, formateur) ou de l'utilisateur (pour user)
         const students = await User.find(
             { createdBy: req.user.resourceId },
-            'login permissions allowedRooms'
+            'login permissions allowedRooms' 
         );
-
+        
         let organisationData = null;
         if (req.user.is_owner && req.user.organisation) {
             // Si c'est un 'owner', on charge les détails de l'orga et la liste des formateurs
@@ -467,7 +464,7 @@ app.get('/api/account/details', protect, async (req, res) => {
                 { organisation: req.user.organisation._id, is_owner: false }, // role: 'formateur'
                 'email'
             );
-
+            
             // req.user.organisation est déjà peuplé par le middleware 'protect'
             organisationData = {
                 ...req.user.organisation.toObject(),
@@ -493,17 +490,17 @@ app.get('/api/account/details', protect, async (req, res) => {
 app.post('/api/account/change-password', protect, async (req, res) => {
     try {
         const { currentPassword, newPassword } = req.body;
-
+        
         const isMatch = await bcrypt.compare(currentPassword, req.user.passwordHash);
 
         if (!isMatch) {
             return res.status(400).json({ error: 'Mot de passe actuel incorrect.' });
         }
-
+        
         req.user.passwordHash = await bcrypt.hash(newPassword, 10);
 
         await req.user.save();
-
+        
         res.json({ success: true, message: 'Mot de passe mis à jour.' });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -529,10 +526,10 @@ app.post('/api/account/request-change-email', protect, async (req, res) => {
         if (existingUser) {
             return res.status(400).json({ error: 'Cette adresse e-mail est déjà utilisée.' });
         }
-
+        
         // 3. Générer un token de vérification
         const token = crypto.randomBytes(32).toString('hex');
-
+        
         user.newEmail = newEmail.toLowerCase();
         user.newEmailToken = token;
         user.newEmailTokenExpires = Date.now() + 3600000; // Valide 1 heure
@@ -540,13 +537,13 @@ app.post('/api/account/request-change-email', protect, async (req, res) => {
 
         // 4. Envoyer l'email de vérification (Simulation)
         const verifyLink = `http://localhost:${PORT}/api/account/verify-change-email?token=${token}`;
-
+        
         console.log('--- SIMULATION D\'ENVOI D\'EMAIL DE CHANGEMENT ---');
         console.log(`À: ${newEmail}`);
         console.log(`Sujet: Confirmez votre nouvelle adresse e-mail EIdos`);
         console.log(`Corps: ... cliquez sur ce lien pour confirmer : ${verifyLink}`);
         console.log('-----------------------------------');
-
+        
         // VRAI ENVOI D'EMAIL (décommenter et configurer)
         /*
         await transporter.sendMail({
@@ -560,7 +557,7 @@ app.post('/api/account/request-change-email', protect, async (req, res) => {
                    <p>Ce lien expirera dans 1 heure.</p>`
         });
         */
-
+        
         res.json({ success: true, message: `Un e-mail de vérification a été envoyé à ${newEmail}.` });
 
     } catch (err) {
@@ -593,7 +590,7 @@ app.get('/api/account/verify-change-email', async (req, res) => {
         user.newEmailToken = null;
         user.newEmailTokenExpires = null;
         await user.save();
-
+        
         // Redirige l'utilisateur vers la page de compte avec un message de succès
         // (Une page HTML simple est souvent préférable)
         res.send('<h1>Succès !</h1><p>Votre adresse e-mail a été mise à jour. Vous pouvez fermer cet onglet et vous reconnecter.</p>');
@@ -627,10 +624,10 @@ app.delete('/api/account/delete', protect, async (req, res) => {
             // Supprime l'organisation
             await Organisation.deleteOne({ _id: orgId });
         }
-
+        
         // Finalement, supprime l'utilisateur
         await User.deleteOne({ _id: userId });
-
+        
         res.json({ success: true, message: 'Compte supprimé avec succès.' });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -643,12 +640,12 @@ app.post('/api/account/invite', protect, async (req, res) => {
     if (req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
-
+    
     // Le plan effectif est vérifié
     if (req.user.effectivePlan === 'free') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
-
+    
     try {
         // Les étudiants sont comptés par rapport au 'resourceId'
         const studentCount = await User.countDocuments({ createdBy: req.user.resourceId });
@@ -660,16 +657,16 @@ app.post('/api/account/invite', protect, async (req, res) => {
             return res.status(403).json({ error: 'Limite de 40 étudiants atteinte pour le plan Promo.' });
         }
         // Le plan 'centre' n'a pas de limite d'étudiants
-
+        
         const { login, password } = req.body;
-
+        
         const existingStudent = await User.findOne({ login: login.toLowerCase() });
         if (existingStudent) {
             return res.status(400).json({ error: 'Ce login est déjà utilisé.' });
         }
 
         const passwordHash = await bcrypt.hash(password, 10);
-
+        
         // MODIFICATION : Ajout de 'comptesRendus: true'
         const defaultPermissions = {
             header: true, admin: true, vie: true, observations: true,
@@ -688,12 +685,12 @@ app.post('/api/account/invite', protect, async (req, res) => {
             createdBy: req.user.resourceId, // L'étudiant est créé par le 'resourceId'
             isVerified: true,
             permissions: defaultPermissions,
-            allowedRooms: defaultRooms
+            allowedRooms: defaultRooms 
         });
 
         await newStudent.save();
         res.status(201).json({ success: true, message: 'Compte étudiant créé.' });
-
+        
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -704,10 +701,10 @@ app.put('/api/account/permissions', protect, async (req, res) => {
     if (req.user.effectivePlan === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
-
+    
     try {
         const { login, permission, value } = req.body;
-
+        
         const student = await User.findOne({
             login: login.toLowerCase(),
             createdBy: req.user.resourceId // Vérifie que l'étudiant appartient bien à ce formateur/owner
@@ -716,7 +713,7 @@ app.put('/api/account/permissions', protect, async (req, res) => {
         if (!student) {
             return res.status(404).json({ error: 'Étudiant non trouvé' });
         }
-
+        
         if (!student.permissions) {
             student.permissions = {};
         }
@@ -724,9 +721,9 @@ app.put('/api/account/permissions', protect, async (req, res) => {
         student.permissions[permission] = value;
         student.markModified('permissions');
         await student.save();
-
+        
         res.json({ success: true, message: 'Permission mise à jour.' });
-
+        
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -737,10 +734,10 @@ app.put('/api/account/student/rooms', protect, async (req, res) => {
     if (req.user.effectivePlan === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
-
+    
     try {
         const { login, rooms } = req.body;
-
+        
         const student = await User.findOne({
             login: login.toLowerCase(),
             createdBy: req.user.resourceId // Vérifie que l'étudiant appartient bien à ce formateur/owner
@@ -749,16 +746,16 @@ app.put('/api/account/student/rooms', protect, async (req, res) => {
         if (!student) {
             return res.status(404).json({ error: 'Étudiant non trouvé' });
         }
-
+        
         if (!Array.isArray(rooms) || !rooms.every(r => typeof r === 'string' && r.startsWith('chambre_'))) {
-            return res.status(400).json({ error: 'Format de chambres non valide.' });
+             return res.status(400).json({ error: 'Format de chambres non valide.' });
         }
 
         student.allowedRooms = rooms;
         await student.save();
-
+        
         res.json({ success: true, message: 'Chambres autorisées mises à jour.' });
-
+        
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -769,10 +766,10 @@ app.delete('/api/account/student', protect, async (req, res) => {
     if (req.user.effectivePlan === 'free' || req.user.role === 'etudiant') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
-
+    
     try {
         const { login } = req.body;
-
+        
         const result = await User.deleteOne({
             login: login.toLowerCase(),
             createdBy: req.user.resourceId // Vérifie que l'étudiant appartient bien à ce formateur/owner
@@ -781,9 +778,9 @@ app.delete('/api/account/student', protect, async (req, res) => {
         if (result.deletedCount === 0) {
             return res.status(404).json({ error: 'Étudiant non trouvé' });
         }
-
+        
         res.json({ success: true, message: 'Compte étudiant supprimé.' });
-
+        
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -806,41 +803,41 @@ app.post('/api/account/change-subscription', protect, async (req, res) => {
         if (!user) {
             return res.status(404).json({ error: 'Utilisateur non trouvé.' });
         }
-
+        
         if (newPlan === 'centre') {
             // L'utilisateur demande un plan Centre
             if (user.organisation) {
                 return res.status(400).json({ error: "Vous êtes déjà rattaché à un centre." });
             }
-
+            
             user.role = 'owner';
             user.is_owner = true;
-
+            
             const newOrganisation = new Organisation({
                 name: `Centre de ${user.email}`,
                 owner: user._id,
                 is_active: false, // Inactif jusqu'au paiement du devis
-
+                
                 // TODO ADMIN : L'admin doit remplir ces champs manuellement
-                quote_url: "https://votre-site.com/lien-admin-a-remplir",
+                quote_url: "https://votre-site.com/lien-admin-a-remplir", 
                 quote_price: "Devis en attente"
             });
             await newOrganisation.save();
-
+            
             user.organisation = newOrganisation._id;
-
+            
         } else {
             // Changement vers un plan personnel
             user.subscription = newPlan;
             user.role = 'user';
             user.is_owner = false;
-            user.organisation = null;
+            user.organisation = null; 
         }
 
         await user.save();
-
-        res.json({
-            success: true,
+        
+        res.json({ 
+            success: true, 
             message: 'Abonnement mis à jour.'
         });
 
@@ -867,11 +864,11 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
         if (existingUser) {
             return res.status(400).json({ error: 'Un utilisateur avec cet e-mail existe déjà.' });
         }
-
+        
         // 2. Vérifier les licences
         const formateurCount = await User.countDocuments({ organisation: organisation._id, role: 'formateur' });
         if (formateurCount >= organisation.licences_max) {
-            return res.status(403).json({ error: "La limite de formateurs pour votre centre a été atteinte." });
+             return res.status(403).json({ error: "La limite de formateurs pour votre centre a été atteinte." });
         }
 
         // 3. Créer le token et l'invitation
@@ -885,14 +882,14 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
 
         // 4. Envoyer l'e-mail (Simulation)
         const inviteLink = `http://localhost:${PORT}/auth.html?invitation_token=${token}`;
-
+        
         console.log('--- SIMULATION D\'ENVOI D\'EMAIL ---');
         console.log(`À: ${email}`);
         console.log(`De: EIdos <ne-pas-repondre@eidos.fr>`);
         console.log(`Sujet: Vous avez été invité à rejoindre ${organisation.name} sur EIdos`);
         console.log(`Corps: ... cliquez sur ce lien pour créer votre compte formateur : ${inviteLink}`);
         console.log('-----------------------------------');
-
+        
         // VRAI ENVOI D'EMAIL (décommenter et configurer)
         /*
         await transporter.sendMail({
@@ -923,13 +920,13 @@ app.post('/api/organisation/remove', protect, async (req, res) => {
 
     try {
         const { email } = req.body;
-
+        
         const formateur = await User.findOne({
             email: email.toLowerCase(),
             organisation: req.user.organisation._id,
             is_owner: false // On ne peut pas se retirer soi-même
         });
-
+        
         if (!formateur) {
             return res.status(404).json({ error: 'Formateur non trouvé dans votre organisation.' });
         }
@@ -960,7 +957,7 @@ app.get('/api/patients', protect, async (req, res) => {
         }
 
         const patients = await Patient.find(
-            query,
+            query, 
             'patientId sidebar_patient_name'
         );
         res.json(patients);
@@ -1000,9 +997,9 @@ app.post('/api/patients/save', protect, async (req, res) => {
             // Vérification de la limite de sauvegarde
             // =================================================================
             const plan = req.user.effectivePlan;
-
+            
             if (plan === 'independant' || plan === 'promo') {
-
+                
                 const saveCount = await Patient.countDocuments({
                     user: req.user.resourceId,
                     patientId: { $regex: /^save_/ }
@@ -1013,8 +1010,8 @@ app.post('/api/patients/save', protect, async (req, res) => {
                 if (plan === 'promo') limit = 50;
 
                 if (saveCount >= limit) {
-                    return res.status(403).json({
-                        error: `Limite de ${limit} archives atteinte pour le plan ${plan}.`
+                    return res.status(403).json({ 
+                        error: `Limite de ${limit} archives atteinte pour le plan ${plan}.` 
                     });
                 }
             }
@@ -1043,24 +1040,24 @@ app.get('/api/patients/:patientId', protect, async (req, res) => {
     // Si l'utilisateur est 'free', le frontend (app.js) ne devrait pas faire cet appel
     // Mais s'il le fait, la logique de sauvegarde (POST) l'empêchera d'enregistrer.
     // La lecture d'un dossier vide est autorisée.
-
+    
     try {
-        let patient = await Patient.findOne({
+        let patient = await Patient.findOne({ 
             patientId: req.params.patientId,
             user: req.user.resourceId
         });
-
+        
         if (!patient && req.params.patientId.startsWith('chambre_')) {
-            patient = new Patient({
-                patientId: req.params.patientId,
-                user: req.user.resourceId,
-                sidebar_patient_name: `Chambre ${req.params.patientId.split('_')[1]}`
+            patient = new Patient({ 
+                patientId: req.params.patientId, 
+                user: req.user.resourceId, 
+                sidebar_patient_name: `Chambre ${req.params.patientId.split('_')[1]}` 
             });
             await patient.save();
         } else if (!patient) {
             return res.status(404).json({ error: 'Dossier non trouvé' });
         }
-
+        
         res.json(patient.dossierData || {});
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1073,9 +1070,9 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
         // Le plan 'free' ne peut pas sauvegarder
         // MODIFICATION : Correction de la logique (identique à celle que vous avez demandée précédemment)
         if (req.user.effectivePlan === 'free' && req.user.role !== 'etudiant') {
-            return res.status(403).json({ error: 'Le plan Free ne permet pas la sauvegarde.' });
+             return res.status(403).json({ error: 'Le plan Free ne permet pas la sauvegarde.' });
         }
-
+        
         if (!req.params.patientId.startsWith('chambre_')) {
             return res.status(400).json({ error: 'Cette route est réservée à la mise à jour des chambres.' });
         }
@@ -1083,20 +1080,20 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
         const { dossierData, sidebar_patient_name } = req.body;
         const userIdToSave = req.user.resourceId;
         let finalDossierData = dossierData;
-
+        
         // NOUVEAU : Initialiser l'objet de mise à jour de la sidebar
         let sidebarUpdate = {};
 
         // Si c'est un étudiant, on fusionne les données en fonction des permissions
         if (req.user.role === 'etudiant') {
             const permissions = req.user.permissions;
-
-            const existingPatient = await Patient.findOne({
-                patientId: req.params.patientId,
-                user: userIdToSave
+            
+            const existingPatient = await Patient.findOne({ 
+                patientId: req.params.patientId, 
+                user: userIdToSave 
             });
             const existingData = existingPatient ? existingPatient.dossierData : {};
-
+            
             const mergedData = { ...existingData };
 
             // Logique de fusion (simplifiée)
@@ -1104,7 +1101,7 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
                 ['patient-nom-usage', 'patient-prenom', 'patient-dob', 'patient-motif', 'patient-entry-date'].forEach(k => {
                     if (dossierData[k] !== undefined) mergedData[k] = dossierData[k];
                 });
-
+                
                 // *** DEBUT DE LA CORRECTION ***
                 // Si le header est autorisé, on force la synchronisation
                 // des champs admin correspondants, peu importe la permission 'admin'.
@@ -1116,19 +1113,19 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
                     }
                 });
                 // *** FIN DE LA CORRECTION ***
-
+                
                 sidebarUpdate = { sidebar_patient_name: sidebar_patient_name };
             }
-
+            
             if (permissions.admin) {
                 // MODIFICATION : Ne pas retraiter les champs déjà synchronisés
                 const adminFieldsToSync = ['admin-nom-usage', 'admin-prenom', 'admin-dob'];
-                Object.keys(dossierData).filter(k =>
+                Object.keys(dossierData).filter(k => 
                     k.startsWith('admin-') && !adminFieldsToSync.includes(k)
                 ).forEach(k => mergedData[k] = dossierData[k]);
             }
             if (permissions.vie) {
-                Object.keys(dossierData).filter(k => k.startsWith('vie-') || k.startsWith('atcd-')).forEach(k => mergedData[k] = dossierData[k]);
+                 Object.keys(dossierData).filter(k => k.startsWith('vie-') || k.startsWith('atcd-')).forEach(k => mergedData[k] = dossierData[k]);
             }
             if (permissions.observations) {
                 mergedData['observations'] = dossierData['observations'];
@@ -1153,7 +1150,7 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             if (permissions.biologie) {
                 mergedData['biologie'] = dossierData['biologie'];
             }
-
+            
             finalDossierData = mergedData;
         } else {
             // Le formateur/owner peut toujours mettre à jour le nom
@@ -1161,22 +1158,22 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
         }
 
         await Patient.findOneAndUpdate(
-            { patientId: req.params.patientId, user: userIdToSave },
-            {
-                dossierData: finalDossierData,
+            { patientId: req.params.patientId, user: userIdToSave }, 
+            { 
+                dossierData: finalDossierData, 
                 // MODIFICATION : Utilisation de l'objet dynamique
                 ...sidebarUpdate,
-                user: userIdToSave
-            },
+                user: userIdToSave 
+            }, 
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
-
+        
         // --- NOUVEAU : Émission de l'événement Socket.io ---
         try {
             // L'ID de l'utilisateur qui a fait la modification
             const senderSocketId = req.headers['x-socket-id'];
             const roomName = `room_${req.user.resourceId}`;
-
+            
             // On cherche le socket de l'émetteur
             const sockets = await io.in(roomName).fetchSockets();
             const senderSocket = sockets.find(s => s.id === senderSocketId);
@@ -1184,9 +1181,9 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             const eventData = {
                 patientId: req.params.patientId,
                 dossierData: finalDossierData,
-                sender: senderSocketId
+                sender: senderSocketId 
             };
-
+            
             if (senderSocket) {
                 // Émet à tout le monde dans la room, SAUF à l'émetteur
                 senderSocket.to(roomName).emit('patient_updated', eventData);
@@ -1201,7 +1198,7 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
             console.error("Erreur lors de l'émission du socket :", socketError);
         }
         // --- FIN DE L'ÉMISSION ---
-
+        
         res.json({ success: true, message: 'Dossier de chambre mis à jour.' });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1210,7 +1207,7 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
 
 // DELETE /api/patients/:patientId (MODIFIÉ : Utilise effectivePlan)
 app.delete('/api/patients/:patientId', protect, async (req, res) => {
-
+    
     if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
@@ -1223,15 +1220,15 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
             // Réinitialise une chambre (efface les données)
             await Patient.findOneAndUpdate(
                 { patientId: patientId, user: userId },
-                {
-                    dossierData: {},
-                    sidebar_patient_name: `Chambre ${patientId.split('_')[1]}`
+                { 
+                    dossierData: {}, 
+                    sidebar_patient_name: `Chambre ${patientId.split('_')[1]}` 
                 },
                 { upsert: true, new: true }
             );
-
+            
             // --- NOUVEAU : Émission de l'événement Socket.io pour le clear ---
-            try {
+             try {
                 const roomName = `room_${req.user.resourceId}`;
                 const eventData = {
                     patientId: patientId,
@@ -1243,14 +1240,14 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
                 console.error("Erreur lors de l'émission du socket (clear):", socketError);
             }
             // --- FIN DE L'ÉMISSION ---
-
+            
             res.json({ success: true, message: 'Chambre réinitialisée.' });
 
         } else if (patientId.startsWith('save_')) {
             // Supprime une sauvegarde (archive)
-            await Patient.deleteOne({
-                patientId: patientId,
-                user: userId
+            await Patient.deleteOne({ 
+                patientId: patientId, 
+                user: userId 
             });
             res.json({ success: true, message: 'Sauvegarde supprimée.' });
         } else {
@@ -1263,7 +1260,7 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
 
 // NOUVEAU : Webhook pour le paiement
 // ... (code inchangé)
-app.post('/api/webhook/payment-received', express.raw({ type: 'application/json' }), async (req, res) => {
+app.post('/api/webhook/payment-received', express.raw({type: 'application/json'}), async (req, res) => {
     // ... (code inchangé)
     console.log("Événement Webhook reçu (Simulation) !");
     try {
@@ -1279,7 +1276,7 @@ app.post('/api/webhook/payment-received', express.raw({ type: 'application/json'
 mongoose.connect(MONGO_URI)
     .then(() => {
         console.log('✅ Connecté avec succès à MongoDB !');
-
+        
         // MODIFIÉ : Lancement du httpServer au lieu de app
         httpServer.listen(PORT, () => {
             console.log(`🚀 Serveur backend (Express + Socket.io) démarré sur http://localhost:${PORT}`);
