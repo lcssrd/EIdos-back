@@ -1,8 +1,48 @@
-port: 587,
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const path = require('path');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+require('dotenv').config();
+
+const app = express();
+
+// --- CONFIGURATION DE SÉCURITÉ ---
+app.use(helmet());
+
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Limite chaque IP à 100 requêtes par fenêtre
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+app.use(limiter);
+
+const corsOptions = {
+    origin: process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(',') : "*",
+    optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
+
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+const MONGO_URI = process.env.MONGO_URI;
+const JWT_SECRET = process.env.JWT_SECRET;
+
+// --- CONFIGURATION SIMULÉE DE NODEMAILER ---
+const transporter = nodemailer.createTransport({
+    host: 'smtp.ethereal.email',
+    port: 587,
     auth: {
-    user: 'reyna.vonrueden@ethereal.email', // Compte test Ethereal
+        user: 'reyna.vonrueden@ethereal.email', // Compte test Ethereal
         pass: 'JqXN2AMJ9xnmZ2N4Gg'       // Compte test Ethereal
-}
+    }
 });
 
 console.log("Pour voir les e-mails de test, allez sur : https://ethereal.email/login");
