@@ -1,18 +1,8 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const PORT = process.env.PORT || 3000;
-const MONGO_URI = process.env.MONGO_URI;
-const JWT_SECRET = process.env.JWT_SECRET;
-
-// --- CONFIGURATION SIMULÉE DE NODEMAILER ---
-const transporter = nodemailer.createTransport({
-    host: 'smtp.ethereal.email',
-    port: 587,
+port: 587,
     auth: {
-        user: 'reyna.vonrueden@ethereal.email', // Compte test Ethereal
+    user: 'reyna.vonrueden@ethereal.email', // Compte test Ethereal
         pass: 'JqXN2AMJ9xnmZ2N4Gg'       // Compte test Ethereal
-    }
+}
 });
 
 console.log("Pour voir les e-mails de test, allez sur : https://ethereal.email/login");
