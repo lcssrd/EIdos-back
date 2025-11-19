@@ -31,11 +31,11 @@ const MONGO_URI = process.env.MONGO_URI;
 const JWT_SECRET = process.env.JWT_SECRET; 
 
 // --- CONFIGURATION DE NODEMAILER (BREVO) ---
-// Modifié pour utiliser les variables d'environnement définies dans .env
 const transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: parseInt(process.env.SMTP_PORT || '587'),
-    secure: false, // true pour le port 465, false pour les autres ports
+    // Si le port est 465, on met secure à true, sinon false (pour 587 ou 2525)
+    secure: parseInt(process.env.SMTP_PORT) === 465, 
     auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS
@@ -340,15 +340,29 @@ app.post('/auth/signup', async (req, res) => {
             }
         }
         
-        // TODO : Envoyer le VRAI email de vérification ici si ce n'est pas une invitation
+        // --- ENVOI DE L'EMAIL DE VÉRIFICATION (si ce n'est pas une invitation) ---
         if (!token) {
-            console.log(`CODE DE VÉRIFICATION pour ${email}: ${confirmationCode}`);
+            try {
+                await transporter.sendMail({
+                    from: `"EIdos" <${process.env.EMAIL_FROM}>`,
+                    to: email,
+                    subject: 'Vérifiez votre compte EIdos',
+                    html: `
+                        <h3>Bienvenue sur EIdos !</h3>
+                        <p>Votre code de vérification est :</p>
+                        <h2 style="color:#0d9488; letter-spacing: 5px;">${confirmationCode}</h2>
+                        <p>Saisissez ce code sur la page de vérification pour activer votre compte.</p>
+                    `
+                });
+                console.log(`Email de vérification envoyé à ${email}`);
+            } catch (emailError) {
+                console.error("Erreur envoi email inscription:", emailError);
+            }
         }
         
         res.status(201).json({ 
             success: true, 
-            message: 'Utilisateur créé. Veuillez vérifier votre email.',
-            _test_code: token ? null : confirmationCode 
+            message: 'Utilisateur créé. Veuillez vérifier votre email.'
         });
     } catch (err) {
         console.error(err);
@@ -531,9 +545,7 @@ app.post('/api/account/request-change-email', protect, async (req, res) => {
         // Nous utilisons process.env.FRONTEND_URL ou une URL construite pour le lien de vérification
         const verifyLink = `${req.protocol}://${req.get('host')}/api/account/verify-change-email?token=${token}`;
         
-        console.log(`Envoi email changement à ${newEmail} avec lien ${verifyLink}`);
-        
-        // ACTIVATION DE L'ENVOI RÉEL
+        // ENVOI RÉEL
         await transporter.sendMail({
             from: `"EIdos" <${process.env.EMAIL_FROM}>`, // Utilise le postmaster
             to: newEmail,
@@ -846,13 +858,10 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
         });
         await invitation.save();
 
-        // Utilisation de process.env.FRONTEND_URL si disponible, sinon localhost (à adapter en prod)
         const baseUrl = process.env.FRONTEND_URL || `http://localhost:${PORT}`;
         const inviteLink = `${baseUrl}/auth.html?invitation_token=${token}`;
         
-        console.log(`Envoi invitation formateur à ${email}`);
-        
-        // ACTIVATION DE L'ENVOI RÉEL
+        // ENVOI RÉEL
         await transporter.sendMail({
             from: `"EIdos" <${process.env.EMAIL_FROM}>`, // Utilise le postmaster
             to: email,
