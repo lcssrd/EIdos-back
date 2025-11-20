@@ -159,13 +159,11 @@ const protect = async (req, res, next) => {
 
         // --- Définition de l'ID des ressources (qui possède les patients/étudiants ?) ---
         if (user.role === 'etudiant') {
-            // Un étudiant accède aux ressources de son créateur
+            // Un étudiant accède aux ressources de son créateur (le formateur OU le propriétaire)
             req.user.resourceId = user.createdBy;
-        } else if (user.role === 'formateur' && user.organisation) {
-            // Un formateur invité accède aux ressources du propriétaire de l'organisation
-            req.user.resourceId = user.organisation.owner;
         } else {
-            // Un 'user' (indépendant/promo) ou un 'owner' (centre) est propriétaire de ses propres ressources
+            // MODIFIÉ : Tout formateur (qu'il soit owner, invité, ou indépendant) 
+            // est maintenant propriétaire de ses propres ressources (étudiants/patients).
             req.user.resourceId = user._id;
         }
 
@@ -208,9 +206,8 @@ io.use(async (socket, next) => {
         let resourceId;
         if (user.role === 'etudiant') {
             resourceId = user.createdBy;
-        } else if (user.role === 'formateur' && user.organisation) {
-            resourceId = user.organisation.owner;
         } else {
+            // MODIFIÉ : Le formateur invité utilise son propre ID pour ses salles/sockets
             resourceId = user._id;
         }
 
@@ -512,6 +509,7 @@ app.get('/api/account/details', protect, async (req, res) => {
     }
 
     try {
+        // MODIFIÉ : On cherche les étudiants créés par l'utilisateur (resourceId = user._id)
         const students = await User.find(
             { createdBy: req.user.resourceId },
             'login permissions allowedRooms'
