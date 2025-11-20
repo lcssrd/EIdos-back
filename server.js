@@ -261,7 +261,7 @@ app.post('/auth/signup', async (req, res) => {
         let newUser;
 
         if (token) {
-            // --- Logique d'invitation ---
+            // --- Logique d'invitation (MODIFIÉ POUR RETOURNER VERIFIED: TRUE) ---
             const invitation = await Invitation.findOne({ token: token, email: email.toLowerCase() }).populate('organisation');
 
             if (!invitation || invitation.expires_at < Date.now()) {
@@ -290,6 +290,13 @@ app.post('/auth/signup', async (req, res) => {
 
             await newUser.save();
             await Invitation.deleteOne({ _id: invitation._id }); // Supprime le token
+
+            // Retourne une réponse spécifique indiquant que la vérification est déjà faite
+            return res.status(201).json({
+                success: true,
+                message: 'Compte formateur créé avec succès.',
+                verified: true // Flag pour le frontend
+            });
 
         } else {
             // --- Logique d'inscription standard ---
@@ -338,10 +345,8 @@ app.post('/auth/signup', async (req, res) => {
                 });
                 await newUser.save();
             }
-        }
 
-        // --- ENVOI DE L'EMAIL DE VÉRIFICATION (si ce n'est pas une invitation) ---
-        if (!token) {
+            // --- ENVOI DE L'EMAIL DE VÉRIFICATION (Seulement ici) ---
             try {
                 await transporter.sendMail({
                     from: `"EIdos" <${process.env.EMAIL_FROM}>`,
@@ -358,12 +363,14 @@ app.post('/auth/signup', async (req, res) => {
             } catch (emailError) {
                 console.error("Erreur envoi email inscription:", emailError);
             }
-        }
 
-        res.status(201).json({
-            success: true,
-            message: 'Utilisateur créé. Veuillez vérifier votre email.'
-        });
+            // Réponse standard avec demande de vérification
+            return res.status(201).json({
+                success: true,
+                message: 'Utilisateur créé. Veuillez vérifier votre email.',
+                verified: false
+            });
+        }
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: err.message });
