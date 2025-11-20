@@ -283,7 +283,7 @@ app.post('/auth/signup', async (req, res) => {
                 passwordHash,
                 isVerified: true, // L'invitation par e-mail vaut vérification
                 role: 'formateur',
-                subscription: 'free', // Hérite du plan 'centre'
+                subscription: 'promo', // MODIFIÉ : 'promo' au lieu de 'free'
                 organisation: invitation.organisation._id,
                 is_owner: false
             });
