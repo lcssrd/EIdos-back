@@ -261,8 +261,9 @@ app.post('/auth/signup', async (req, res) => {
             // --- Logique d'invitation (MODIFIÉ POUR RETOURNER VERIFIED: TRUE) ---
             const invitation = await Invitation.findOne({ token: token, email: email.toLowerCase() }).populate('organisation');
 
+            // --- MODIFICATION ICI : Message d'erreur plus clair ---
             if (!invitation || invitation.expires_at < Date.now()) {
-                return res.status(400).json({ error: "Token d'invitation invalide ou expiré." });
+                return res.status(400).json({ error: "L'adresse email ne correspond pas à celle de l'invitation ou le lien a expiré." });
             }
 
             // Compter les licences
@@ -908,7 +909,9 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
         await invitation.save();
 
         const baseUrl = process.env.FRONTEND_URL || `http://localhost:${PORT}`;
-        const inviteLink = `${baseUrl}/auth.html?invitation_token=${token}`;
+        
+        // --- MODIFICATION ICI : Ajout de l'email dans l'URL ---
+        const inviteLink = `${baseUrl}/auth.html?invitation_token=${token}&email=${encodeURIComponent(email)}`;
 
         // ENVOI RÉEL
         await transporter.sendMail({
