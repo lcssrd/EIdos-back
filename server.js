@@ -13,15 +13,50 @@ const { Server } = require("socket.io");
 
 // --- CONFIGURATION ---
 const app = express();
-app.use(cors());
+
+// Render (et d'autres load balancers) ajoute le header 'x-forwarded-proto'
+app.use((req, res, next) => {
+    if (req.headers['x-forwarded-proto'] === 'http') {
+        // Si la requête est en HTTP, on redirige vers HTTPS
+        return res.redirect(`https://${req.headers.host}${req.url}`);
+    }
+    // Sinon (HTTPS ou localhost), on continue
+    next();
+});
+
+// LISTE DES ORIGINES AUTORISÉES (Whitelist)
+// Ajoutez ici votre domaine OVH (https) et votre local pour les tests
+const allowedOrigins = [
+    'https://eidos-simul.fr',       // Votre production OVH
+    'https://www.eidos-simul.fr',   // Variante www
+    'https://eidos-app.vercel.app',   // Variante site    
+    'http://127.0.0.1:5500',        // Votre local (Live Server)
+    'http://localhost:3000'         // Autre local possible
+];
+
+// Configuration CORS pour Express (API REST)
+app.use(cors({
+    origin: function (origin, callback) {
+        // Autoriser les requêtes sans origine (ex: Postman, mobile apps) ou si dans la liste
+        if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            callback(new Error('Non autorisé par CORS'));
+        }
+    },
+    credentials: true // Important si vous utilisez des cookies ou headers sécurisés
+}));
+
 app.use(express.json());
 
 // Création du serveur HTTP et de l'instance Socket.io
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
     cors: {
-        origin: "*", // En production, restreignez ceci à l'URL de votre front-end
-        methods: ["GET", "POST"]
+        // Configuration CORS spécifique pour les WebSockets
+        origin: allowedOrigins,
+        methods: ["GET", "POST"],
+        credentials: true
     }
 });
 
