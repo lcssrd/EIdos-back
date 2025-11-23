@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
+require('dotenv').config();
 
 // Importations pour Socket.io
 const http = require('http');
@@ -103,10 +104,8 @@ const patientSchema = new mongoose.Schema({
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     sidebar_patient_name: { type: String, default: '' },
     dossierData: { type: mongoose.Schema.Types.Mixed, default: {} },
-    is_public: { type: Boolean, default: false } // NOUVEAU : Pour le partage global
+    is_public: { type: Boolean, default: false }
 });
-// Index unique composite : un user ne peut pas avoir deux fois le même patientId
-// Note : Pour les publics, plusieurs users peuvent "voir" le même ID, mais la sauvegarde 'save_' est unique par créateur.
 patientSchema.index({ patientId: 1, user: 1 }, { unique: true });
 const Patient = mongoose.model('Patient', patientSchema);
 
@@ -151,9 +150,8 @@ const protect = async (req, res, next) => {
     }
 };
 
-// --- NOUVEAU : Middleware Admin ---
+// --- Middleware Admin ---
 const adminProtect = (req, res, next) => {
-    // Vérifie l'email spécifique de l'administrateur
     if (req.user && req.user.email === 'lucas.seraudie@gmail.com') {
         next();
     } else {
@@ -161,7 +159,7 @@ const adminProtect = (req, res, next) => {
     }
 };
 
-// --- Middleware d'authentification Socket.io ---
+// --- Middleware Socket.io ---
 io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) return next(new Error('Authentification échouée (pas de token)'));
@@ -189,16 +187,12 @@ io.use(async (socket, next) => {
 io.on('connection', (socket) => {
     const roomName = `room_${socket.resourceId}`;
     socket.join(roomName);
-    
-    socket.on('disconnect', () => {
-        // console.log(`Utilisateur déconnecté : ${socket.id}`);
-    });
+    socket.on('disconnect', () => {});
 });
 
 
 // --- ROUTES D'AUTHENTIFICATION ---
 
-// POST /auth/signup
 app.post('/auth/signup', async (req, res) => {
     try {
         const { email, password, plan, token } = req.body;
@@ -322,7 +316,6 @@ app.post('/auth/signup', async (req, res) => {
     }
 });
 
-// POST /auth/resend-code
 app.post('/auth/resend-code', async (req, res) => {
     try {
         const { email } = req.body;
@@ -349,7 +342,6 @@ app.post('/auth/resend-code', async (req, res) => {
     }
 });
 
-// POST /auth/verify
 app.post('/auth/verify', async (req, res) => {
     try {
         const { email, code } = req.body;
@@ -370,7 +362,6 @@ app.post('/auth/verify', async (req, res) => {
     }
 });
 
-// POST /auth/login
 app.post('/auth/login', async (req, res) => {
     try {
         const { identifier, password } = req.body;
@@ -404,7 +395,6 @@ app.post('/auth/login', async (req, res) => {
     }
 });
 
-// GET /api/auth/me
 app.get('/api/auth/me', protect, async (req, res) => {
     res.json({
         ...req.user.toObject(),
@@ -413,9 +403,8 @@ app.get('/api/auth/me', protect, async (req, res) => {
 });
 
 
-// --- ROUTES ADMIN (NOUVEAU) ---
+// --- ROUTES ADMIN ---
 
-// GET /api/admin/stats
 app.get('/api/admin/stats', protect, adminProtect, async (req, res) => {
     try {
         const userCount = await User.countDocuments();
@@ -424,131 +413,76 @@ app.get('/api/admin/stats', protect, adminProtect, async (req, res) => {
         const studentCount = await User.countDocuments({ role: 'etudiant' });
         const formateurCount = await User.countDocuments({ role: { $in: ['formateur', 'user', 'owner'] } });
 
-        res.json({ 
-            userCount, 
-            patientCount, 
-            orgCount,
-            studentCount,
-            formateurCount
-        });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        res.json({ userCount, patientCount, orgCount, studentCount, formateurCount });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /api/admin/data (Users & Orgs & Scenarios)
 app.get('/api/admin/data', protect, adminProtect, async (req, res) => {
     try {
-        // Récupérer les utilisateurs sans le hash du mot de passe
         const users = await User.find().select('-passwordHash').populate('organisation').populate('createdBy', 'email');
         const organisations = await Organisation.find().populate('owner', 'email');
-        
-        // Récupérer tous les scénarios sauvegardés (privés et publics)
-        const scenarios = await Patient.find({ patientId: { $regex: /^save_/ } })
-                                       .populate('user', 'email')
-                                       .select('patientId sidebar_patient_name is_public user');
-        
+        const scenarios = await Patient.find({ patientId: { $regex: /^save_/ } }).populate('user', 'email').select('patientId sidebar_patient_name is_public user');
         res.json({ users, organisations, scenarios });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// DELETE /api/admin/users/:id (Suppression forcée)
 app.delete('/api/admin/users/:id', protect, adminProtect, async (req, res) => {
     try {
         const userId = req.params.id;
-        
-        // Supprimer les patients liés à cet utilisateur
         await Patient.deleteMany({ user: userId });
-        
-        // Supprimer les étudiants créés par cet utilisateur
         await User.deleteMany({ createdBy: userId });
-        
-        // Gérer l'organisation si c'est un propriétaire
         const user = await User.findById(userId);
         if (user && user.is_owner) {
-             // Supprimer l'organisation
              await Organisation.deleteOne({ owner: userId });
-             // Détacher les formateurs liés
-             await User.updateMany(
-                 { organisation: user.organisation }, 
-                 { $set: { organisation: null, role: 'user', subscription: 'free' } }
-             );
+             await User.updateMany({ organisation: user.organisation }, { $set: { organisation: null, role: 'user', subscription: 'free' } });
         }
-        
-        // Supprimer l'utilisateur lui-même
         await User.deleteOne({ _id: userId });
-        
-        res.json({ success: true, message: 'Utilisateur et données associées supprimés.' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        res.json({ success: true, message: 'Utilisateur supprimé.' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// PUT /api/admin/scenarios/:id/toggle-public (Changer la visibilité)
+// --- NOUVEAU : Route Admin pour supprimer un scénario ---
+app.delete('/api/admin/scenarios/:id', protect, adminProtect, async (req, res) => {
+    try {
+        const result = await Patient.deleteOne({ patientId: req.params.id });
+        if (result.deletedCount === 0) {
+            return res.status(404).json({ error: 'Scénario non trouvé.' });
+        }
+        res.json({ success: true, message: 'Scénario supprimé.' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.put('/api/admin/scenarios/:id/toggle-public', protect, adminProtect, async (req, res) => {
     try {
         const scenario = await Patient.findOne({ patientId: req.params.id });
         if(!scenario) return res.status(404).json({error: 'Scénario non trouvé'});
-        
         scenario.is_public = !scenario.is_public;
         await scenario.save();
-        
         res.json({ success: true, is_public: scenario.is_public });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 
-// --- ROUTES DE GESTION DE COMPTE ---
+// --- ROUTES COMPTE & API --- (Idem précédent)
 
-// GET /api/account/details
 app.get('/api/account/details', protect, async (req, res) => {
-    if (req.user.role === 'etudiant') {
-        return res.status(403).json({ error: 'Non autorisé' });
-    }
-
+    if (req.user.role === 'etudiant') return res.status(403).json({ error: 'Non autorisé' });
     try {
-        const students = await User.find(
-            { createdBy: req.user.resourceId },
-            'login permissions allowedRooms'
-        );
-
+        const students = await User.find({ createdBy: req.user.resourceId }, 'login permissions allowedRooms');
         let organisationData = null;
         if (req.user.is_owner && req.user.organisation) {
-            const formateurs = await User.find(
-                { organisation: req.user.organisation._id, is_owner: false },
-                'email'
-            );
-
-            organisationData = {
-                ...req.user.organisation.toObject(),
-                formateurs: formateurs,
-                licences_utilisees: formateurs.length + 1
-            };
+            const formateurs = await User.find({ organisation: req.user.organisation._id, is_owner: false }, 'email');
+            organisationData = { ...req.user.organisation.toObject(), formateurs: formateurs, licences_utilisees: formateurs.length + 1 };
         }
-
-        res.json({
-            email: req.user.email,
-            plan: req.user.effectivePlan,
-            role: req.user.role,
-            is_owner: req.user.is_owner,
-            students: students,
-            organisation: organisationData
-        });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        res.json({ email: req.user.email, plan: req.user.effectivePlan, role: req.user.role, is_owner: req.user.is_owner, students: students, organisation: organisationData });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ... (Autres routes de compte : change-password, change-email, delete, etc. restent inchangées)
 app.post('/api/account/change-password', protect, async (req, res) => {
     try {
         const { currentPassword, newPassword } = req.body;
         const isMatch = await bcrypt.compare(currentPassword, req.user.passwordHash);
-        if (!isMatch) return res.status(400).json({ error: 'Mot de passe actuel incorrect.' });
+        if (!isMatch) return res.status(400).json({ error: 'Mot de passe incorrect.' });
         req.user.passwordHash = await bcrypt.hash(newPassword, 10);
         await req.user.save();
         res.json({ success: true, message: 'Mot de passe mis à jour.' });
@@ -558,26 +492,24 @@ app.post('/api/account/change-password', protect, async (req, res) => {
 app.post('/api/account/request-change-email', protect, async (req, res) => {
     try {
         const { newEmail, password } = req.body;
-        const user = req.user;
-        const isMatch = await bcrypt.compare(password, user.passwordHash);
-        if (!isMatch) return res.status(400).json({ error: 'Mot de passe actuel incorrect.' });
-        const existingUser = await User.findOne({ email: newEmail.toLowerCase() });
-        if (existingUser) return res.status(400).json({ error: 'Cette adresse e-mail est déjà utilisée.' });
+        const isMatch = await bcrypt.compare(password, req.user.passwordHash);
+        if (!isMatch) return res.status(400).json({ error: 'Mot de passe incorrect.' });
+        if (await User.findOne({ email: newEmail.toLowerCase() })) return res.status(400).json({ error: 'Email déjà utilisé.' });
 
         const token = crypto.randomBytes(32).toString('hex');
-        user.newEmail = newEmail.toLowerCase();
-        user.newEmailToken = token;
-        user.newEmailTokenExpires = Date.now() + 3600000;
-        await user.save();
+        req.user.newEmail = newEmail.toLowerCase();
+        req.user.newEmailToken = token;
+        req.user.newEmailTokenExpires = Date.now() + 3600000;
+        await req.user.save();
 
         const verifyLink = `${req.protocol}://${req.get('host')}/api/account/verify-change-email?token=${token}`;
         await transporter.sendMail({
             from: `"EIdos" <${process.env.EMAIL_FROM}>`,
             to: newEmail,
             subject: 'Confirmez votre nouvelle adresse e-mail EIdos',
-            html: `<h3>Bonjour,</h3><p>Veuillez confirmer en cliquant :</p><a href="${verifyLink}">Confirmer</a>`
+            html: `<h3>Bonjour,</h3><p>Cliquez ici pour confirmer : <a href="${verifyLink}">Confirmer</a></p>`
         });
-        res.json({ success: true, message: `E-mail de vérification envoyé à ${newEmail}.` });
+        res.json({ success: true, message: `Email de vérification envoyé à ${newEmail}.` });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -586,7 +518,7 @@ app.get('/api/account/verify-change-email', async (req, res) => {
         const { token } = req.query;
         if (!token) return res.status(400).send('Token manquant.');
         const user = await User.findOne({ newEmailToken: token, newEmailTokenExpires: { $gt: Date.now() } });
-        if (!user) return res.status(400).send('Lien invalide ou expiré.');
+        if (!user) return res.status(400).send('Lien invalide.');
         user.email = user.newEmail;
         user.newEmail = null;
         user.newEmailToken = null;
@@ -614,18 +546,13 @@ app.delete('/api/account/delete', protect, async (req, res) => {
 app.post('/api/account/invite', protect, async (req, res) => {
     if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') return res.status(403).json({ error: 'Non autorisé' });
     try {
-        const studentCount = await User.countDocuments({ createdBy: req.user.resourceId });
-        if (req.user.effectivePlan === 'independant' && studentCount >= 5) return res.status(403).json({ error: 'Limite de 5 atteinte.' });
-        if (req.user.effectivePlan === 'promo' && studentCount >= 40) return res.status(403).json({ error: 'Limite de 40 atteinte.' });
-
         const { login, password } = req.body;
-        const existingStudent = await User.findOne({ login: login.toLowerCase() });
-        if (existingStudent) return res.status(400).json({ error: 'Ce login est déjà utilisé.' });
+        if (await User.findOne({ login: login.toLowerCase() })) return res.status(400).json({ error: 'Login utilisé.' });
+        const studentCount = await User.countDocuments({ createdBy: req.user.resourceId });
+        const limit = req.user.effectivePlan === 'independant' ? 5 : (req.user.effectivePlan === 'promo' ? 40 : 999);
+        if (studentCount >= limit) return res.status(403).json({ error: 'Limite atteinte.' });
 
         const passwordHash = await bcrypt.hash(password, 10);
-        const defaultPermissions = { header: true, admin: true, vie: true, observations: true, comptesRendus: true, prescriptions_add: true, prescriptions_delete: true, prescriptions_validate: true, transmissions: true, pancarte: true, diagramme: true, biologie: true };
-        const defaultRooms = Array.from({ length: 10 }, (_, i) => `chambre_${101 + i}`);
-
         const newStudent = new User({
             login: login.toLowerCase(),
             passwordHash,
@@ -633,11 +560,11 @@ app.post('/api/account/invite', protect, async (req, res) => {
             subscription: 'free',
             createdBy: req.user.resourceId,
             isVerified: true,
-            permissions: defaultPermissions,
-            allowedRooms: defaultRooms
+            permissions: { header: true, admin: true, vie: true, observations: true, comptesRendus: true, prescriptions_add: true, prescriptions_delete: true, prescriptions_validate: true, transmissions: true, pancarte: true, diagramme: true, biologie: true },
+            allowedRooms: Array.from({ length: 10 }, (_, i) => `chambre_${101 + i}`)
         });
         await newStudent.save();
-        res.status(201).json({ success: true, message: 'Compte étudiant créé.' });
+        res.status(201).json({ success: true, message: 'Étudiant créé.' });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -646,12 +573,12 @@ app.put('/api/account/permissions', protect, async (req, res) => {
     try {
         const { login, permission, value } = req.body;
         const student = await User.findOne({ login: login.toLowerCase(), createdBy: req.user.resourceId });
-        if (!student) return res.status(404).json({ error: 'Étudiant non trouvé' });
+        if (!student) return res.status(404).json({ error: 'Non trouvé.' });
         if (!student.permissions) student.permissions = {};
         student.permissions[permission] = value;
         student.markModified('permissions');
         await student.save();
-        res.json({ success: true, message: 'Permission mise à jour.' });
+        res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -660,10 +587,10 @@ app.put('/api/account/student/rooms', protect, async (req, res) => {
     try {
         const { login, rooms } = req.body;
         const student = await User.findOne({ login: login.toLowerCase(), createdBy: req.user.resourceId });
-        if (!student) return res.status(404).json({ error: 'Étudiant non trouvé' });
+        if (!student) return res.status(404).json({ error: 'Non trouvé.' });
         student.allowedRooms = rooms;
         await student.save();
-        res.json({ success: true, message: 'Chambres mises à jour.' });
+        res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -671,9 +598,9 @@ app.delete('/api/account/student', protect, async (req, res) => {
     if (req.user.effectivePlan === 'free' || req.user.role === 'etudiant') return res.status(403).json({ error: 'Non autorisé' });
     try {
         const { login } = req.body;
-        const result = await User.deleteOne({ login: login.toLowerCase(), createdBy: req.user.resourceId });
-        if (result.deletedCount === 0) return res.status(404).json({ error: 'Étudiant non trouvé' });
-        res.json({ success: true, message: 'Compte étudiant supprimé.' });
+        const resDel = await User.deleteOne({ login: login.toLowerCase(), createdBy: req.user.resourceId });
+        if (resDel.deletedCount === 0) return res.status(404).json({ error: 'Non trouvé.' });
+        res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -683,19 +610,15 @@ app.post('/api/account/change-subscription', protect, async (req, res) => {
         const user = await User.findById(req.user._id);
         if (newPlan === 'centre') {
             if (user.organisation) return res.status(400).json({ error: "Déjà rattaché." });
-            user.role = 'owner';
-            user.is_owner = true;
-            const newOrganisation = new Organisation({ name: `Centre de ${user.email}`, owner: user._id });
-            await newOrganisation.save();
-            user.organisation = newOrganisation._id;
+            user.role = 'owner'; user.is_owner = true;
+            const org = new Organisation({ name: `Centre de ${user.email}`, owner: user._id });
+            await org.save();
+            user.organisation = org._id;
         } else {
-            user.subscription = newPlan;
-            user.role = 'user';
-            user.is_owner = false;
-            user.organisation = null;
+            user.subscription = newPlan; user.role = 'user'; user.is_owner = false; user.organisation = null;
         }
         await user.save();
-        res.json({ success: true, message: 'Abonnement mis à jour.' });
+        res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -703,25 +626,16 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
     if (!req.user.is_owner || !req.user.organisation) return res.status(403).json({ error: 'Non autorisé' });
     try {
         const { email } = req.body;
-        const organisation = req.user.organisation;
-        const existingUser = await User.findOne({ email: email.toLowerCase() });
-        if (existingUser) return res.status(400).json({ error: 'Email existe déjà.' });
-        const formateurCount = await User.countDocuments({ organisation: organisation._id, role: 'formateur' });
-        if (formateurCount >= organisation.licences_max) return res.status(403).json({ error: "Limite atteinte." });
+        if (await User.findOne({ email: email.toLowerCase() })) return res.status(400).json({ error: 'Email existe.' });
+        const count = await User.countDocuments({ organisation: req.user.organisation._id, role: 'formateur' });
+        if (count >= req.user.organisation.licences_max) return res.status(403).json({ error: "Limite atteinte." });
 
         const token = crypto.randomBytes(32).toString('hex');
-        const invitation = new Invitation({ email: email.toLowerCase(), organisation: organisation._id, token: token });
-        await invitation.save();
-
-        const baseUrl = process.env.FRONTEND_URL || `http://localhost:${PORT}`;
-        const inviteLink = `${baseUrl}/auth.html?invitation_token=${token}&email=${encodeURIComponent(email)}`;
-        await transporter.sendMail({
-            from: `"EIdos" <${process.env.EMAIL_FROM}>`,
-            to: email,
-            subject: `Invitation à rejoindre ${organisation.name}`,
-            html: `<p>Rejoignez ${organisation.name} : <a href="${inviteLink}">Créer compte</a></p>`
-        });
-        res.status(200).json({ success: true, message: `Invitation envoyée.` });
+        const inv = new Invitation({ email: email.toLowerCase(), organisation: req.user.organisation._id, token: token });
+        await inv.save();
+        const link = `${process.env.FRONTEND_URL || `http://localhost:${PORT}`}/auth.html?invitation_token=${token}&email=${encodeURIComponent(email)}`;
+        await transporter.sendMail({ from: `"EIdos" <${process.env.EMAIL_FROM}>`, to: email, subject: 'Invitation EIdos', html: `<a href="${link}">Rejoindre</a>` });
+        res.status(200).json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -729,249 +643,118 @@ app.post('/api/organisation/remove', protect, async (req, res) => {
     if (!req.user.is_owner || !req.user.organisation) return res.status(403).json({ error: 'Non autorisé' });
     try {
         const { email } = req.body;
-        const formateur = await User.findOne({ email: email.toLowerCase(), organisation: req.user.organisation._id, is_owner: false });
-        if (!formateur) return res.status(404).json({ error: 'Formateur non trouvé.' });
-        formateur.organisation = null;
-        formateur.role = 'user';
-        formateur.subscription = 'free';
-        await formateur.save();
-        res.status(200).json({ success: true, message: `${email} retiré.` });
+        const f = await User.findOne({ email: email.toLowerCase(), organisation: req.user.organisation._id, is_owner: false });
+        if (!f) return res.status(404).json({ error: 'Non trouvé.' });
+        f.organisation = null; f.role = 'user'; f.subscription = 'free';
+        await f.save();
+        res.status(200).json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-
-// --- ROUTES API (Patients) ---
-
-// GET /api/patients (Liste)
 app.get('/api/patients', protect, async (req, res) => {
     try {
-        // NOUVEAU : L'utilisateur voit ses ressources ET les scénarios publics
-        const query = { 
-            $or: [
-                { user: req.user.resourceId },
-                { is_public: true }
-            ]
-        };
-
-        // Pour les étudiants, on restreint quand même aux chambres autorisées, 
-        // mais s'ils doivent voir des exemples publics, on peut l'ajouter ici.
-        // Pour simplifier, un étudiant voit les chambres de son formateur (qui peuvent être publiques)
-        // Si on veut qu'un étudiant voie les cas publics globaux, on garde le $or.
         if (req.user.role === 'etudiant') {
-            // L'étudiant voit les chambres assignées par son prof
-            // ET potentiellement les cas publics globaux s'ils ont le droit de charger des cas.
-            // Mais l'étudiant n'a pas de bouton "Charger". Il n'a accès qu'à sa liste.
-            // Donc pour l'étudiant, on reste sur allowedRooms.
-            const studentQuery = { 
-                user: req.user.resourceId, 
-                patientId: { $in: req.user.allowedRooms } 
-            };
-            const patients = await Patient.find(studentQuery, 'patientId sidebar_patient_name');
-            return res.json(patients);
+            const p = await Patient.find({ user: req.user.resourceId, patientId: { $in: req.user.allowedRooms } }, 'patientId sidebar_patient_name');
+            return res.json(p);
         }
-
-        const patients = await Patient.find(query, 'patientId sidebar_patient_name is_public');
-        res.json(patients);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const p = await Patient.find({ $or: [{ user: req.user.resourceId }, { is_public: true }] }, 'patientId sidebar_patient_name is_public');
+        res.json(p);
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/patients/save (Création/Sauvegarde d'un CAS)
 app.post('/api/patients/save', protect, async (req, res) => {
-    if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') {
-        return res.status(403).json({ error: 'Non autorisé' });
-    }
-
+    if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') return res.status(403).json({ error: 'Non autorisé' });
     try {
         const { dossierData, sidebar_patient_name } = req.body;
+        if (!sidebar_patient_name) return res.status(400).json({ error: 'Nom requis.' });
 
-        if (!sidebar_patient_name || sidebar_patient_name.startsWith('Chambre ')) {
-            return res.status(400).json({ error: 'Veuillez donner un nom au patient.' });
+        const existing = await Patient.findOne({ user: req.user.resourceId, sidebar_patient_name: sidebar_patient_name, patientId: { $regex: /^save_/ } });
+        if (existing) {
+            await Patient.updateOne({ _id: existing._id }, { dossierData: dossierData });
+            return res.json({ success: true });
+        }
+        
+        const plan = req.user.effectivePlan;
+        if (plan === 'independant' || plan === 'promo') {
+            const count = await Patient.countDocuments({ user: req.user.resourceId, patientId: { $regex: /^save_/ }, is_public: { $ne: true } });
+            const limit = plan === 'independant' ? 20 : 50;
+            if (count >= limit) return res.status(403).json({ error: 'Limite atteinte.' });
         }
 
-        const existingSave = await Patient.findOne({
-            user: req.user.resourceId,
-            sidebar_patient_name: sidebar_patient_name,
-            patientId: { $regex: /^save_/ }
-        });
-
-        if (existingSave) {
-            await Patient.updateOne({ _id: existingSave._id }, { dossierData: dossierData });
-            res.json({ success: true, message: 'Sauvegarde mise à jour.' });
-        } else {
-            const plan = req.user.effectivePlan;
-
-            if (plan === 'independant' || plan === 'promo') {
-                // NOUVEAU : On ne compte PAS les scénarios publics dans le quota
-                const saveCount = await Patient.countDocuments({
-                    user: req.user.resourceId,
-                    patientId: { $regex: /^save_/ },
-                    is_public: { $ne: true }
-                });
-
-                let limit = 0;
-                if (plan === 'independant') limit = 20;
-                if (plan === 'promo') limit = 50;
-
-                if (saveCount >= limit) {
-                    return res.status(403).json({ error: `Limite de ${limit} archives atteinte.` });
-                }
-            }
-
-            const newPatientId = `save_${new mongoose.Types.ObjectId()}`;
-            const newPatient = new Patient({
-                patientId: newPatientId,
-                user: req.user.resourceId,
-                dossierData: dossierData,
-                sidebar_patient_name: sidebar_patient_name,
-                is_public: false // Par défaut privé
-            });
-            await newPatient.save();
-            res.status(201).json({ success: true, message: 'Dossier sauvegardé.' });
-        }
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const np = new Patient({ patientId: `save_${new mongoose.Types.ObjectId()}`, user: req.user.resourceId, dossierData: dossierData, sidebar_patient_name: sidebar_patient_name, is_public: false });
+        await np.save();
+        res.status(201).json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /api/patients/:patientId (Détail)
 app.get('/api/patients/:patientId', protect, async (req, res) => {
     try {
-        // Recherche d'abord si c'est le patient de l'utilisateur
-        let patient = await Patient.findOne({
-            patientId: req.params.patientId,
-            user: req.user.resourceId
-        });
-
-        // Si pas trouvé, et que ce n'est pas une chambre (car les chambres sont créées à la volée),
-        // on regarde si c'est un scénario PUBLIC
-        if (!patient && req.params.patientId.startsWith('save_')) {
-            patient = await Patient.findOne({
-                patientId: req.params.patientId,
-                is_public: true
-            });
-        }
-
-        if (!patient && req.params.patientId.startsWith('chambre_')) {
-            // Création à la volée pour les chambres
-            patient = new Patient({
-                patientId: req.params.patientId,
-                user: req.user.resourceId,
-                sidebar_patient_name: `Chambre ${req.params.patientId.split('_')[1]}`
-            });
-            await patient.save();
-        } else if (!patient) {
-            return res.status(404).json({ error: 'Dossier non trouvé' });
-        }
-
-        res.json(patient.dossierData || {});
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        let p = await Patient.findOne({ patientId: req.params.patientId, user: req.user.resourceId });
+        if (!p && req.params.patientId.startsWith('save_')) p = await Patient.findOne({ patientId: req.params.patientId, is_public: true });
+        if (!p && req.params.patientId.startsWith('chambre_')) {
+            p = new Patient({ patientId: req.params.patientId, user: req.user.resourceId, sidebar_patient_name: `Chambre ${req.params.patientId.split('_')[1]}` });
+            await p.save();
+        } else if (!p) return res.status(404).json({ error: 'Non trouvé' });
+        res.json(p.dossierData || {});
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/patients/:patientId (Mise à jour Temps Réel - Chambres uniquement)
 app.post('/api/patients/:patientId', protect, async (req, res) => {
     try {
-        if (req.user.effectivePlan === 'free' && req.user.role !== 'etudiant') {
-            return res.status(403).json({ error: 'Le plan Free ne permet pas la sauvegarde.' });
-        }
-        if (!req.params.patientId.startsWith('chambre_')) {
-            return res.status(400).json({ error: 'Réservé aux chambres.' });
-        }
+        if (req.user.effectivePlan === 'free' && req.user.role !== 'etudiant') return res.status(403).json({ error: 'Plan Free.' });
+        if (!req.params.patientId.startsWith('chambre_')) return res.status(400).json({ error: 'Chambres uniquement.' });
 
         const { dossierData, sidebar_patient_name } = req.body;
-        const userIdToSave = req.user.resourceId;
-        let finalDossierData = dossierData;
-        let sidebarUpdate = {};
+        const userId = req.user.resourceId;
+        let finalData = dossierData;
+        let updates = { sidebar_patient_name };
 
         if (req.user.role === 'etudiant') {
-            const permissions = req.user.permissions;
-            const existingPatient = await Patient.findOne({ patientId: req.params.patientId, user: userIdToSave });
-            const existingData = existingPatient ? existingPatient.dossierData : {};
-            const mergedData = { ...existingData };
-
-            if (permissions.header) {
-                ['patient-nom-usage', 'patient-prenom', 'patient-dob', 'patient-motif', 'patient-entry-date'].forEach(k => { if (dossierData[k] !== undefined) mergedData[k] = dossierData[k]; });
-                const adminFieldsToSync = ['admin-nom-usage', 'admin-prenom', 'admin-dob'];
-                adminFieldsToSync.forEach(ak => { const pk = ak.replace('admin-', 'patient-'); if (dossierData[pk] !== undefined) mergedData[ak] = dossierData[pk]; });
-                sidebarUpdate = { sidebar_patient_name: sidebar_patient_name };
+            const perms = req.user.permissions;
+            const existing = await Patient.findOne({ patientId: req.params.patientId, user: userId });
+            const merged = { ...(existing ? existing.dossierData : {}) };
+            if (perms.header) {
+                ['patient-nom-usage', 'patient-prenom', 'patient-dob', 'patient-motif', 'patient-entry-date'].forEach(k => { if (dossierData[k] !== undefined) merged[k] = dossierData[k]; });
+                ['admin-nom-usage', 'admin-prenom', 'admin-dob'].forEach(ak => { const pk = ak.replace('admin-', 'patient-'); if (dossierData[pk] !== undefined) merged[ak] = dossierData[pk]; });
             }
-            if (permissions.admin) Object.keys(dossierData).filter(k => k.startsWith('admin-')).forEach(k => mergedData[k] = dossierData[k]);
-            if (permissions.vie) Object.keys(dossierData).filter(k => k.startsWith('vie-') || k.startsWith('atcd-')).forEach(k => mergedData[k] = dossierData[k]);
-            if (permissions.observations) mergedData['observations'] = dossierData['observations'];
-            if (permissions.prescriptions_add || permissions.prescriptions_delete || permissions.prescriptions_validate) mergedData['prescriptions'] = dossierData['prescriptions'];
-            if (permissions.transmissions) mergedData['transmissions'] = dossierData['transmissions'];
-            if (permissions.comptesRendus) mergedData['comptesRendus'] = dossierData['comptesRendus'];
-            if (permissions.pancarte) { mergedData['pancarte'] = dossierData['pancarte']; mergedData['glycemie'] = dossierData['glycemie']; }
-            if (permissions.diagramme) { mergedData['care-diagram-tbody_html'] = dossierData['care-diagram-tbody_html']; mergedData['careDiagramCheckboxes'] = dossierData['careDiagramCheckboxes']; }
-            if (permissions.biologie) mergedData['biologie'] = dossierData['biologie'];
-
-            finalDossierData = mergedData;
-        } else {
-            sidebarUpdate = { sidebar_patient_name: sidebar_patient_name };
+            if (perms.admin) Object.keys(dossierData).filter(k => k.startsWith('admin-')).forEach(k => merged[k] = dossierData[k]);
+            if (perms.vie) Object.keys(dossierData).filter(k => k.startsWith('vie-') || k.startsWith('atcd-')).forEach(k => merged[k] = dossierData[k]);
+            ['observations', 'prescriptions', 'transmissions', 'comptesRendus', 'biologie'].forEach(k => { if (perms[k] || (k === 'prescriptions' && (perms.prescriptions_add || perms.prescriptions_delete || perms.prescriptions_validate))) merged[k] = dossierData[k]; });
+            if (perms.pancarte) { merged.pancarte = dossierData.pancarte; merged.glycemie = dossierData.glycemie; }
+            if (perms.diagramme) { merged['care-diagram-tbody_html'] = dossierData['care-diagram-tbody_html']; merged.careDiagramCheckboxes = dossierData.careDiagramCheckboxes; }
+            finalData = merged;
         }
 
-        await Patient.findOneAndUpdate(
-            { patientId: req.params.patientId, user: userIdToSave },
-            { dossierData: finalDossierData, ...sidebarUpdate, user: userIdToSave },
-            { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-
+        await Patient.findOneAndUpdate({ patientId: req.params.patientId, user: userId }, { dossierData: finalData, ...updates, user: userId }, { upsert: true, new: true, setDefaultsOnInsert: true });
+        
         try {
-            const senderSocketId = req.headers['x-socket-id'];
-            const roomName = `room_${req.user.resourceId}`;
-            const sockets = await io.in(roomName).fetchSockets();
-            const senderSocket = sockets.find(s => s.id === senderSocketId);
-            const eventData = { patientId: req.params.patientId, dossierData: finalDossierData, sender: senderSocketId };
-            if (senderSocket) senderSocket.to(roomName).emit('patient_updated', eventData);
-            else io.to(roomName).emit('patient_updated', eventData);
-        } catch (socketError) { console.error("Erreur socket :", socketError); }
-
-        res.json({ success: true, message: 'Mis à jour.' });
+            const sender = req.headers['x-socket-id'];
+            const room = `room_${userId}`;
+            const sockets = await io.in(room).fetchSockets();
+            const s = sockets.find(s => s.id === sender);
+            const evt = { patientId: req.params.patientId, dossierData: finalData, sender };
+            if (s) s.to(room).emit('patient_updated', evt); else io.to(room).emit('patient_updated', evt);
+        } catch (e) {}
+        res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/api/patients/:patientId', protect, async (req, res) => {
     if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') return res.status(403).json({ error: 'Non autorisé' });
     try {
-        const patientId = req.params.patientId;
-        const userId = req.user.resourceId;
-
-        if (patientId.startsWith('chambre_')) {
-            await Patient.findOneAndUpdate(
-                { patientId: patientId, user: userId },
-                { dossierData: {}, sidebar_patient_name: `Chambre ${patientId.split('_')[1]}` },
-                { upsert: true, new: true }
-            );
-            try {
-                const roomName = `room_${userId}`;
-                io.to(roomName).emit('patient_updated', { patientId: patientId, dossierData: {} });
-            } catch (socketError) {}
-            res.json({ success: true, message: 'Chambre réinitialisée.' });
-        } else if (patientId.startsWith('save_')) {
-            await Patient.deleteOne({ patientId: patientId, user: userId });
-            res.json({ success: true, message: 'Sauvegarde supprimée.' });
-        } else {
-            res.status(400).json({ error: 'ID invalide.' });
-        }
+        const pid = req.params.patientId;
+        const uid = req.user.resourceId;
+        if (pid.startsWith('chambre_')) {
+            await Patient.findOneAndUpdate({ patientId: pid, user: uid }, { dossierData: {}, sidebar_patient_name: `Chambre ${pid.split('_')[1]}` }, { upsert: true });
+            io.to(`room_${uid}`).emit('patient_updated', { patientId: pid, dossierData: {} });
+            res.json({ success: true });
+        } else if (pid.startsWith('save_')) {
+            await Patient.deleteOne({ patientId: pid, user: uid });
+            res.json({ success: true });
+        } else res.status(400).json({ error: 'ID invalide.' });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/webhook/payment-received', express.raw({ type: 'application/json' }), async (req, res) => {
-    res.json({ received: true });
-});
+app.post('/api/webhook/payment-received', express.raw({ type: 'application/json' }), async (req, res) => { res.json({ received: true }); });
 
-// --- DÉMARRAGE ---
-mongoose.connect(MONGO_URI)
-    .then(() => {
-        console.log('✅ Connecté à MongoDB !');
-        httpServer.listen(PORT, () => {
-            console.log(`🚀 Serveur démarré sur le port ${PORT}`);
-        });
-    })
-    .catch((err) => {
-        console.error('❌ Erreur MongoDB :', err);
-        process.exit(1);
-    });
+mongoose.connect(MONGO_URI).then(() => { console.log('✅ MongoDB connecté'); httpServer.listen(PORT, () => console.log(`🚀 Port ${PORT}`)); }).catch(e => console.error(e));
