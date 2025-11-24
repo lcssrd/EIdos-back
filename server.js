@@ -29,9 +29,7 @@ app.use((req, res, next) => {
 const allowedOrigins = [
     'https://eidos-simul.fr',       // Votre production OVH
     'https://www.eidos-simul.fr',   // Variante www
-    'https://eidos-app.vercel.app',   // Variante site    
-    'http://127.0.0.1:5500',        // Votre local (Live Server)
-    'http://localhost:3000'         // Autre local possible
+    'https://eidos-app.vercel.app',   // Variante site
 ];
 
 // Configuration CORS pour Express (API REST)
@@ -64,7 +62,7 @@ const io = new Server(httpServer, {
 const PORT = process.env.PORT || 3000;
 const MONGO_URI = process.env.MONGO_URI;
 const JWT_SECRET = process.env.JWT_SECRET;
-const ADMIN_EMAIL = "lucas.seraudie@gmail.com"; // Email du Super Admin
+// MODIFIÉ : Suppression de la constante ADMIN_EMAIL en dur
 
 // --- CONFIGURATION DE NODEMAILER (BREVO) ---
 const transporter = nodemailer.createTransport({
@@ -113,6 +111,8 @@ const userSchema = new mongoose.Schema({
     passwordHash: { type: String, required: true },
     isVerified: { type: Boolean, default: false },
     confirmationCode: { type: String },
+    // MODIFIÉ : Ajout du champ pour le Super Admin
+    is_super_admin: { type: Boolean, default: false },
     role: {
         type: String,
         enum: ['user', 'formateur', 'owner', 'etudiant'],
@@ -183,12 +183,12 @@ const protect = async (req, res, next) => {
     }
 };
 
-// Middleware Admin (vérifie l'email en dur)
+// Middleware Admin (MODIFIÉ : vérifie le champ en DB)
 const checkAdmin = (req, res, next) => {
-    if (req.user && req.user.email === ADMIN_EMAIL) {
+    if (req.user && req.user.is_super_admin === true) {
         next();
     } else {
-        res.status(403).json({ error: 'Accès refusé. Réservé à l\'administrateur.' });
+        res.status(403).json({ error: 'Accès refusé. Réservé au Super Administrateur.' });
     }
 };
 
@@ -305,6 +305,7 @@ app.post('/auth/login', async (req, res) => { /* ... inchangé ... */
 });
 
 app.get('/api/auth/me', protect, async (req, res) => {
+    // MODIFIÉ : On renvoie toutes les infos de l'utilisateur (incluant is_super_admin)
     res.json({ ...req.user.toObject(), effectivePlan: req.user.effectivePlan });
 });
 
@@ -317,7 +318,16 @@ app.get('/api/account/details', protect, async (req, res) => { /* ... inchangé 
         const formateurs = await User.find({ organisation: req.user.organisation._id, is_owner: false }, 'email');
         organisationData = { ...req.user.organisation.toObject(), formateurs, licences_utilisees: formateurs.length + 1 };
     }
-    res.json({ email: req.user.email, plan: req.user.effectivePlan, role: req.user.role, is_owner: req.user.is_owner, students, organisation: organisationData });
+    // MODIFIÉ : On inclut is_super_admin dans la réponse
+    res.json({ 
+        email: req.user.email, 
+        plan: req.user.effectivePlan, 
+        role: req.user.role, 
+        is_owner: req.user.is_owner, 
+        is_super_admin: req.user.is_super_admin, // Ajouté
+        students, 
+        organisation: organisationData 
+    });
 });
 app.post('/api/account/change-password', protect, async (req, res) => { /* ... inchangé ... */ 
     const { currentPassword, newPassword } = req.body;
@@ -593,12 +603,12 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
             if (!patient) return res.status(404).json({ error: "Introuvable" });
 
             // SI Public ET User n'est pas Admin => INTERDIT
-            if (patient.isPublic && req.user.email !== ADMIN_EMAIL) {
+            if (patient.isPublic && req.user.is_super_admin !== true) {
                 return res.status(403).json({ error: "Impossible de supprimer un dossier Public." });
             }
             
             // Vérifier la propriété (sauf si admin)
-            if (patient.user.toString() !== req.user.resourceId.toString() && req.user.email !== ADMIN_EMAIL) {
+            if (patient.user.toString() !== req.user.resourceId.toString() && req.user.is_super_admin !== true) {
                 return res.status(403).json({ error: "Ce dossier ne vous appartient pas." });
             }
 
@@ -621,7 +631,7 @@ app.get('/api/patients/:patientId', protect, async (req, res) => { /* ... */
             const belongsToUser = (patient.user.toString() === req.user.resourceId.toString());
             const isPublic = patient.isPublic;
             // Autoriser si c'est une chambre de l'user OU si c'est un dossier public (pour chargement) OU si l'user est admin
-            if (!belongsToUser && !isPublic && req.user.email !== ADMIN_EMAIL) {
+            if (!belongsToUser && !isPublic && req.user.is_super_admin !== true) {
                  // Cas spécial: Si c'est une chambre, on vérifie la propriété standard
                  if(req.params.patientId.startsWith('chambre_')) return res.status(404).json({ error: 'Non trouvé' });
                  // Si c'est une sauvegarde privée d'un autre
