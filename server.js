@@ -25,7 +25,6 @@ app.use((req, res, next) => {
 });
 
 // LISTE DES ORIGINES AUTORISÉES (Whitelist)
-// Ajoutez ici votre domaine OVH (https) et votre local pour les tests
 const allowedOrigins = [
     'https://eidos-simul.fr',       // Votre production OVH
     'https://www.eidos-simul.fr',   // Variante www
@@ -158,9 +157,7 @@ const protect = async (req, res, next) => {
             return res.status(401).json({ error: 'Utilisateur non trouvé' });
         }
         
-        // --- AUTO-CORRECTION DES ROLES (SI NECESSAIRE) ---
-        // Si un utilisateur a un plan payant mais est encore noté 'user', on le passe en 'formateur'
-        // Cela corrige rétroactivement les comptes existants qui posaient problème.
+        // Auto-correction du rôle pour les anciens comptes
         if (user.role === 'user' && (user.subscription === 'independant' || user.subscription === 'promo')) {
             console.log(`Auto-correction rôle pour ${user.email}: user -> formateur`);
             user.role = 'formateur';
@@ -174,7 +171,6 @@ const protect = async (req, res, next) => {
             req.user.resourceId = user._id;
         }
         
-        // Calcul du plan effectif (utile pour le front, mais moins critique pour la sécu maintenant basée sur le rôle)
         if ((user.role === 'formateur' || user.role === 'owner') && user.organisation && user.organisation.is_active) {
             req.user.effectivePlan = user.organisation.plan;
         } else if (user.role === 'etudiant') {
@@ -238,7 +234,6 @@ app.post('/auth/signup', async (req, res) => {
         const confirmationCode = Math.floor(100000 + Math.random() * 900000).toString();
 
         if (token) {
-            // Inscription via invitation (Centre) -> Role Formateur
             const invitation = await Invitation.findOne({ token: token, email: email.toLowerCase() }).populate('organisation');
             if (!invitation || invitation.expires_at < Date.now()) return res.status(400).json({ error: "Invitation invalide" });
             const formateurCount = await User.countDocuments({ organisation: invitation.organisation._id, role: 'formateur' });
@@ -249,7 +244,6 @@ app.post('/auth/signup', async (req, res) => {
             await Invitation.deleteOne({ _id: invitation._id });
             return res.status(201).json({ success: true, verified: true });
         } else {
-            // Inscription classique
             let newUser;
             const validPlans = ['free', 'independant', 'promo', 'centre'];
             let finalSubscription = plan && validPlans.includes(plan) ? plan : 'free';
@@ -262,12 +256,10 @@ app.post('/auth/signup', async (req, res) => {
                 newUser.organisation = newOrg._id;
                 await newUser.save();
             } else {
-                // --- LOGIQUE CORRIGÉE : Attribution du rôle selon le plan ---
                 let role = 'user';
                 if (finalSubscription === 'independant' || finalSubscription === 'promo') {
                     role = 'formateur';
                 }
-
                 newUser = new User({ email: email.toLowerCase(), passwordHash, confirmationCode, role: role, subscription: finalSubscription });
                 await newUser.save();
             }
@@ -329,13 +321,12 @@ app.get('/api/account/details', protect, async (req, res) => {
     
     if (req.user.is_owner && req.user.organisation) {
         const formateurs = await User.find({ organisation: req.user.organisation._id, is_owner: false }, 'email');
-        // Récupérer aussi les invitations pour l'organisation
         const invitations = await Invitation.find({ organisation: req.user.organisation._id });
         
         organisationData = { 
             ...req.user.organisation.toObject(), 
             formateurs, 
-            invitations, // Liste des invitations
+            invitations, 
             licences_utilisees: formateurs.length + 1 
         };
     }
@@ -414,10 +405,9 @@ app.delete('/api/account/student', protect, async (req, res) => {
 });
 
 app.post('/api/account/change-subscription', protect, async (req, res) => { 
-    // Mise à jour du plan ET du rôle
     const newPlan = req.body.newPlan;
     req.user.subscription = newPlan;
-    req.user.organisation = null; // Si on change de plan, on quitte l'orga
+    req.user.organisation = null;
     
     if (newPlan === 'independant' || newPlan === 'promo') {
         req.user.role = 'formateur';
@@ -433,13 +423,9 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
     try {
         const token = crypto.randomBytes(32).toString('hex');
         const email = req.body.email.toLowerCase();
-        
-        // Création de l'invitation en BDD
         await new Invitation({ email: email, organisation: req.user.organisation._id, token }).save();
         
-        // --- Envoi réel de l'email ---
-        // Construction du lien
-        const baseUrl = 'https://eidos-simul.fr'; // URL de production
+        const baseUrl = 'https://eidos-simul.fr'; 
         const inviteLink = `${baseUrl}/auth.html?invitation_token=${token}&email=${email}`;
         
         await transporter.sendMail({
@@ -462,26 +448,17 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
     }
 });
 
-// Route pour supprimer une invitation
 app.delete('/api/organisation/invite/:id', protect, async (req, res) => {
     if (!req.user.is_owner || !req.user.organisation) return res.status(403).json({ error: 'Non autorisé' });
-    
     try {
         const invitationId = req.params.id;
         const result = await Invitation.deleteOne({ _id: invitationId, organisation: req.user.organisation._id });
-        
-        if (result.deletedCount === 0) {
-            return res.status(404).json({ error: "Invitation introuvable ou déjà supprimée." });
-        }
-        
+        if (result.deletedCount === 0) return res.status(404).json({ error: "Invitation introuvable ou déjà supprimée." });
         res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/organisation/remove', protect, async (req, res) => { 
-    // Quand on retire un formateur, il repasse en 'user' (free)
     await User.updateOne({ email: req.body.email.toLowerCase(), organisation: req.user.organisation._id }, { organisation: null, role: 'user', subscription: 'free' });
     res.json({ success: true });
 });
@@ -677,33 +654,48 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
 
 app.get('/api/patients/:patientId', protect, async (req, res) => {
     try {
-        let patient = await Patient.findOne({ patientId: req.params.patientId });
-        
-        if (patient) {
-            const belongsToUser = (patient.user.toString() === req.user.resourceId.toString());
-            const isPublic = patient.isPublic;
-            if (!belongsToUser && !isPublic && req.user.is_super_admin !== true) {
-                 if(req.params.patientId.startsWith('chambre_')) return res.status(404).json({ error: 'Non trouvé' });
-                 return res.status(403).json({ error: 'Accès refusé' });
-            }
+        const patientId = req.params.patientId;
+        const userId = req.user.resourceId;
+
+        // --- CORRECTION CRITIQUE : RECHERCHE SCOPÉE ---
+        // 1. On cherche d'abord si CE patient appartient à l'utilisateur
+        let patient = await Patient.findOne({ patientId: patientId, user: userId });
+
+        // 2. Si non trouvé et que c'est une sauvegarde, on regarde si c'est un dossier public
+        if (!patient && patientId.startsWith('save_')) {
+             patient = await Patient.findOne({ patientId: patientId, isPublic: true });
         }
 
-        if (!patient && req.params.patientId.startsWith('chambre_')) {
-            patient = new Patient({ patientId: req.params.patientId, user: req.user.resourceId, sidebar_patient_name: `Chambre ${req.params.patientId.split('_')[1]}` });
+        // 3. Si trouvé (soit à l'user, soit public), on le renvoie
+        if (patient) {
+             // Vérification redondante mais sécurisante (au cas où le findOne changerait)
+             const belongsToUser = (patient.user.toString() === userId.toString());
+             const isPublic = patient.isPublic;
+             if (!belongsToUser && !isPublic && req.user.is_super_admin !== true) {
+                 return res.status(403).json({ error: 'Accès refusé' });
+             }
+        }
+
+        // 4. Auto-création pour les chambres si non trouvé
+        if (!patient && patientId.startsWith('chambre_')) {
+            patient = new Patient({ 
+                patientId: patientId, 
+                user: userId, 
+                sidebar_patient_name: `Chambre ${patientId.split('_')[1]}` 
+            });
             await patient.save();
         } else if (!patient) {
             return res.status(404).json({ error: 'Dossier non trouvé' });
         }
+        
         res.json(patient.dossierData || {});
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/patients/:patientId', protect, async (req, res) => {
     try {
-        // Sauvegarde temps réel (chambre)
         if (!req.params.patientId.startsWith('chambre_')) return res.status(400).json({ error: 'Chambres uniquement' });
         
-        // INTERDICTION DE MODIFICATION POUR LE ROLE 'user' (Free)
         if (req.user.role === 'user') {
             return res.status(403).json({ error: "Modification interdite pour le plan gratuit." });
         }
