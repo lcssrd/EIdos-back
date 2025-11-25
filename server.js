@@ -29,7 +29,8 @@ app.use((req, res, next) => {
 const allowedOrigins = [
     'https://eidos-simul.fr',       // Votre production OVH
     'https://www.eidos-simul.fr',   // Variante www
-    'https://eidos-app.vercel.app',   // Variante site
+    'https://eidos-app.vercel.app',
+    'https://eidos-6ei.pages.dev' // Variante site
 ];
 
 // Configuration CORS pour Express (API REST)
@@ -685,5 +686,6 @@ app.post('/api/patients/:patientId', protect, async (req, res) => { /* ... Updat
 });
 
 app.post('/api/webhook/payment-received', express.raw({ type: 'application/json' }), async (req, res) => { res.json({ received: true }); });
+
 
 mongoose.connect(MONGO_URI).then(() => { console.log('✅ MongoDB Connecté'); httpServer.listen(PORT, () => console.log(`🚀 Serveur sur port ${PORT}`)); }).catch(e => console.error(e));
