@@ -248,7 +248,15 @@ app.post('/auth/signup', async (req, res) => {
                 newUser.organisation = newOrg._id;
                 await newUser.save();
             } else {
-                newUser = new User({ email: email.toLowerCase(), passwordHash, confirmationCode, role: 'user', subscription: finalSubscription });
+                // --- MODIFICATION LOGIQUE RÔLES ---
+                // Si le plan est payant, on donne directement le rôle 'formateur'.
+                // Sinon ('free'), on donne 'user'.
+                let role = 'user'; 
+                if (finalSubscription === 'independant' || finalSubscription === 'promo') {
+                    role = 'formateur';
+                }
+                
+                newUser = new User({ email: email.toLowerCase(), passwordHash, confirmationCode, role: role, subscription: finalSubscription });
                 await newUser.save();
             }
             try {
@@ -290,7 +298,7 @@ app.post('/auth/login', async (req, res) => {
         if (anID.includes('@')) user = await User.findOne({ email: anID });
         else user = await User.findOne({ login: anID });
         if (!user || !await bcrypt.compare(password, user.passwordHash)) return res.status(401).json({ error: 'Invalide' });
-        if ((user.role === 'user' || user.role === 'owner') && !user.isVerified) return res.status(401).json({ error: 'Non vérifié' });
+        if ((user.role === 'user' || user.role === 'owner' || user.role === 'formateur') && !user.isVerified) return res.status(401).json({ error: 'Non vérifié' });
         const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
         res.json({ success: true, token });
     } catch(e) { res.status(500).json({ error: e.message }); }
@@ -394,7 +402,18 @@ app.delete('/api/account/student', protect, async (req, res) => {
 });
 
 app.post('/api/account/change-subscription', protect, async (req, res) => { 
-    req.user.subscription = req.body.newPlan; req.user.role = 'user'; req.user.organisation = null;
+    // Mise à jour du plan
+    const newPlan = req.body.newPlan;
+    req.user.subscription = newPlan;
+    req.user.organisation = null; // Si on change de plan, on quitte l'orga
+    
+    // Mise à jour du rôle en conséquence
+    if (newPlan === 'independant' || newPlan === 'promo') {
+        req.user.role = 'formateur';
+    } else {
+        req.user.role = 'user';
+    }
+    
     await req.user.save();
     res.json({ success: true });
 });
@@ -451,6 +470,7 @@ app.delete('/api/organisation/invite/:id', protect, async (req, res) => {
 });
 
 app.post('/api/organisation/remove', protect, async (req, res) => { 
+    // Quand on retire un formateur, il repasse en 'user' (free)
     await User.updateOne({ email: req.body.email.toLowerCase(), organisation: req.user.organisation._id }, { organisation: null, role: 'user', subscription: 'free' });
     res.json({ success: true });
 });
@@ -568,7 +588,7 @@ app.get('/api/patients', protect, async (req, res) => {
 });
 
 app.post('/api/patients/save', protect, async (req, res) => {
-    if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') {
+    if (req.user.role === 'etudiant' || req.user.role === 'user') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
     try {
@@ -612,7 +632,7 @@ app.post('/api/patients/save', protect, async (req, res) => {
 });
 
 app.delete('/api/patients/:patientId', protect, async (req, res) => {
-    if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') return res.status(403).json({ error: 'Non autorisé' });
+    if (req.user.role === 'etudiant' || req.user.role === 'user') return res.status(403).json({ error: 'Non autorisé' });
 
     try {
         const patientId = req.params.patientId;
