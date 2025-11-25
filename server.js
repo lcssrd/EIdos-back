@@ -157,12 +157,24 @@ const protect = async (req, res, next) => {
         if (!user) {
             return res.status(401).json({ error: 'Utilisateur non trouvé' });
         }
+        
+        // --- AUTO-CORRECTION DES ROLES (SI NECESSAIRE) ---
+        // Si un utilisateur a un plan payant mais est encore noté 'user', on le passe en 'formateur'
+        // Cela corrige rétroactivement les comptes existants qui posaient problème.
+        if (user.role === 'user' && (user.subscription === 'independant' || user.subscription === 'promo')) {
+            console.log(`Auto-correction rôle pour ${user.email}: user -> formateur`);
+            user.role = 'formateur';
+            await user.save();
+        }
+        
         req.user = user;
         if (user.role === 'etudiant') {
             req.user.resourceId = user.createdBy;
         } else {
             req.user.resourceId = user._id;
         }
+        
+        // Calcul du plan effectif (utile pour le front, mais moins critique pour la sécu maintenant basée sur le rôle)
         if ((user.role === 'formateur' || user.role === 'owner') && user.organisation && user.organisation.is_active) {
             req.user.effectivePlan = user.organisation.plan;
         } else if (user.role === 'etudiant') {
@@ -226,6 +238,7 @@ app.post('/auth/signup', async (req, res) => {
         const confirmationCode = Math.floor(100000 + Math.random() * 900000).toString();
 
         if (token) {
+            // Inscription via invitation (Centre) -> Role Formateur
             const invitation = await Invitation.findOne({ token: token, email: email.toLowerCase() }).populate('organisation');
             if (!invitation || invitation.expires_at < Date.now()) return res.status(400).json({ error: "Invitation invalide" });
             const formateurCount = await User.countDocuments({ organisation: invitation.organisation._id, role: 'formateur' });
@@ -236,6 +249,7 @@ app.post('/auth/signup', async (req, res) => {
             await Invitation.deleteOne({ _id: invitation._id });
             return res.status(201).json({ success: true, verified: true });
         } else {
+            // Inscription classique
             let newUser;
             const validPlans = ['free', 'independant', 'promo', 'centre'];
             let finalSubscription = plan && validPlans.includes(plan) ? plan : 'free';
@@ -248,14 +262,12 @@ app.post('/auth/signup', async (req, res) => {
                 newUser.organisation = newOrg._id;
                 await newUser.save();
             } else {
-                // --- MODIFICATION LOGIQUE RÔLES ---
-                // Si le plan est payant, on donne directement le rôle 'formateur'.
-                // Sinon ('free'), on donne 'user'.
-                let role = 'user'; 
+                // --- LOGIQUE CORRIGÉE : Attribution du rôle selon le plan ---
+                let role = 'user';
                 if (finalSubscription === 'independant' || finalSubscription === 'promo') {
                     role = 'formateur';
                 }
-                
+
                 newUser = new User({ email: email.toLowerCase(), passwordHash, confirmationCode, role: role, subscription: finalSubscription });
                 await newUser.save();
             }
@@ -402,12 +414,11 @@ app.delete('/api/account/student', protect, async (req, res) => {
 });
 
 app.post('/api/account/change-subscription', protect, async (req, res) => { 
-    // Mise à jour du plan
+    // Mise à jour du plan ET du rôle
     const newPlan = req.body.newPlan;
     req.user.subscription = newPlan;
     req.user.organisation = null; // Si on change de plan, on quitte l'orga
     
-    // Mise à jour du rôle en conséquence
     if (newPlan === 'independant' || newPlan === 'promo') {
         req.user.role = 'formateur';
     } else {
@@ -588,6 +599,7 @@ app.get('/api/patients', protect, async (req, res) => {
 });
 
 app.post('/api/patients/save', protect, async (req, res) => {
+    // Sauvegarde archive : Interdit aux 'user' (Free) et 'etudiant'
     if (req.user.role === 'etudiant' || req.user.role === 'user') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
@@ -632,6 +644,7 @@ app.post('/api/patients/save', protect, async (req, res) => {
 });
 
 app.delete('/api/patients/:patientId', protect, async (req, res) => {
+    // Suppression : Interdit aux 'user' (Free) et 'etudiant'
     if (req.user.role === 'etudiant' || req.user.role === 'user') return res.status(403).json({ error: 'Non autorisé' });
 
     try {
@@ -687,21 +700,23 @@ app.get('/api/patients/:patientId', protect, async (req, res) => {
 
 app.post('/api/patients/:patientId', protect, async (req, res) => {
     try {
+        // Sauvegarde temps réel (chambre)
         if (!req.params.patientId.startsWith('chambre_')) return res.status(400).json({ error: 'Chambres uniquement' });
+        
+        // INTERDICTION DE MODIFICATION POUR LE ROLE 'user' (Free)
+        if (req.user.role === 'user') {
+            return res.status(403).json({ error: "Modification interdite pour le plan gratuit." });
+        }
+
         const { dossierData, sidebar_patient_name } = req.body;
         const userIdToSave = req.user.resourceId;
         let finalDossierData = dossierData;
         let sidebarUpdate = {};
         if (req.user.role === 'etudiant') {
-             // Logique simplifiée pour l'étudiant (fusion)
              const permissions = req.user.permissions;
              const existing = await Patient.findOne({ patientId: req.params.patientId, user: userIdToSave });
              const merged = { ...(existing ? existing.dossierData : {}) };
-             
-             // On ne met à jour que ce qui est autorisé
-             // NOTE: Ceci est une simplification, la logique de fusion complète doit être maintenue si elle était plus complexe
              finalDossierData = dossierData; 
-             
              if(permissions.header) { sidebarUpdate = { sidebar_patient_name }; }
         } else {
             sidebarUpdate = { sidebar_patient_name };
