@@ -30,7 +30,7 @@ const allowedOrigins = [
     'https://eidos-simul.fr',       // Votre production OVH
     'https://www.eidos-simul.fr',   // Variante www
     'https://eidos-app.vercel.app',
-    'https://eidos-6ei.pages.dev' // Variante site
+    'https://eidos-6ei.pages.dev', // Variante site
     'https://eidos-simul.pages.dev' // variante
 ];
 
@@ -690,4 +690,5 @@ app.post('/api/webhook/payment-received', express.raw({ type: 'application/json'
 
 
 mongoose.connect(MONGO_URI).then(() => { console.log('✅ MongoDB Connecté'); httpServer.listen(PORT, () => console.log(`🚀 Serveur sur port ${PORT}`)); }).catch(e => console.error(e));
+
 
