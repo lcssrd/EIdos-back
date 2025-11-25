@@ -309,13 +309,13 @@ app.get('/api/account/details', protect, async (req, res) => {
     
     if (req.user.is_owner && req.user.organisation) {
         const formateurs = await User.find({ organisation: req.user.organisation._id, is_owner: false }, 'email');
-        // MODIFIE: Récupérer aussi les invitations pour l'organisation
+        // Récupérer aussi les invitations pour l'organisation
         const invitations = await Invitation.find({ organisation: req.user.organisation._id });
         
         organisationData = { 
             ...req.user.organisation.toObject(), 
             formateurs, 
-            invitations, // Ajouté ici
+            invitations, // Liste des invitations
             licences_utilisees: formateurs.length + 1 
         };
     }
@@ -400,21 +400,44 @@ app.post('/api/account/change-subscription', protect, async (req, res) => {
 });
 
 app.post('/api/organisation/invite', protect, async (req, res) => { 
-    const token = crypto.randomBytes(32).toString('hex');
-    // Envoi email avec lien d'invitation (à compléter selon votre logique d'email)
-    // const inviteLink = `https://eidos-simul.fr/auth.html?invitation_token=${token}&email=${req.body.email}`;
-    await new Invitation({ email: req.body.email.toLowerCase(), organisation: req.user.organisation._id, token }).save();
-    // await transporter.sendMail(...)
-    res.json({ success: true });
+    try {
+        const token = crypto.randomBytes(32).toString('hex');
+        const email = req.body.email.toLowerCase();
+        
+        // Création de l'invitation en BDD
+        await new Invitation({ email: email, organisation: req.user.organisation._id, token }).save();
+        
+        // --- Envoi réel de l'email ---
+        // Construction du lien
+        const baseUrl = 'https://eidos-simul.fr'; // URL de production
+        const inviteLink = `${baseUrl}/auth.html?invitation_token=${token}&email=${email}`;
+        
+        await transporter.sendMail({
+            from: `"EIdos" <${process.env.EMAIL_FROM}>`,
+            to: email,
+            subject: 'Invitation à rejoindre EIdos',
+            html: `
+                <h3>Bonjour,</h3>
+                <p>Vous avez été invité à rejoindre un centre de formation sur EIdos.</p>
+                <p>Pour accepter l'invitation et finaliser votre inscription, cliquez sur le lien ci-dessous :</p>
+                <p><a href="${inviteLink}">Accepter l'invitation</a></p>
+                <p>Ce lien est valable 7 jours.</p>
+            `
+        });
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Erreur envoi invitation:", err);
+        res.status(500).json({ error: "Erreur lors de l'envoi de l'invitation." });
+    }
 });
 
-// MODIFIE: Route pour supprimer une invitation
+// Route pour supprimer une invitation
 app.delete('/api/organisation/invite/:id', protect, async (req, res) => {
     if (!req.user.is_owner || !req.user.organisation) return res.status(403).json({ error: 'Non autorisé' });
     
     try {
         const invitationId = req.params.id;
-        // On vérifie que l'invitation appartient bien à l'organisation de l'utilisateur
         const result = await Invitation.deleteOne({ _id: invitationId, organisation: req.user.organisation._id });
         
         if (result.deletedCount === 0) {
