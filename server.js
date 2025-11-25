@@ -29,7 +29,8 @@ app.use((req, res, next) => {
 const allowedOrigins = [
     'https://eidos-simul.fr',       // Votre production OVH
     'https://www.eidos-simul.fr',   // Variante www
-    'https://eidos-app.vercel.app',   // Variante site
+    'https://eidos-app.vercel.app',   // Variante vercel
+    'https://eidos-simul.pages.dev', // Variante pages dev
 ];
 
 // Configuration CORS pour Express (API REST)
@@ -574,6 +575,20 @@ app.post('/api/patients/save', protect, async (req, res) => {
     try {
         const { dossierData, sidebar_patient_name } = req.body;
         if (!sidebar_patient_name || sidebar_patient_name.startsWith('Chambre ')) return res.status(400).json({ error: 'Nom requis' });
+
+        // MODIF : Vérifier si un dossier PUBLIC avec ce nom existe déjà
+        const publicConflict = await Patient.findOne({
+            sidebar_patient_name: sidebar_patient_name,
+            isPublic: true,
+            patientId: { $regex: /^save_/ }
+        });
+
+        // Si un dossier public existe et que l'utilisateur n'est pas SUPER ADMIN -> Interdire l'écrasement (même logique)
+        if (publicConflict && req.user.is_super_admin !== true) {
+            return res.status(403).json({ 
+                error: "Ce nom est réservé par un dossier public. Veuillez modifier le nom ou le prénom du patient pour sauvegarder votre version." 
+            });
+        }
 
         const existingSave = await Patient.findOne({
             user: req.user.resourceId,
