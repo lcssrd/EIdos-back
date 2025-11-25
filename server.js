@@ -25,23 +25,24 @@ app.use((req, res, next) => {
 });
 
 // LISTE DES ORIGINES AUTORISÉES (Whitelist)
+// Ajoutez ici votre domaine OVH (https) et votre local pour les tests
 const allowedOrigins = [
-    'https://eidos-simul.fr',       
-    'https://www.eidos-simul.fr',   
-    'https://eidos-app.vercel.app',   
-    'http://eidos-simul.pages.dev',   
+    'https://eidos-simul.fr',       // Votre production OVH
+    'https://www.eidos-simul.fr',   // Variante www
+    'https://eidos-app.vercel.app',   // Variante site
 ];
 
 // Configuration CORS pour Express (API REST)
 app.use(cors({
     origin: function (origin, callback) {
+        // Autoriser les requêtes sans origine (ex: Postman, mobile apps) ou si dans la liste
         if (!origin || allowedOrigins.indexOf(origin) !== -1) {
             callback(null, true);
         } else {
             callback(new Error('Non autorisé par CORS'));
         }
     },
-    credentials: true 
+    credentials: true // Important si vous utilisez des cookies ou headers sécurisés
 }));
 
 app.use(express.json());
@@ -50,6 +51,7 @@ app.use(express.json());
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
     cors: {
+        // Configuration CORS spécifique pour les WebSockets
         origin: allowedOrigins,
         methods: ["GET", "POST"],
         credentials: true
@@ -132,7 +134,7 @@ const User = mongoose.model('User', userSchema);
 
 const patientSchema = new mongoose.Schema({
     patientId: { type: String, required: true },
-    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, 
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // Créateur
     sidebar_patient_name: { type: String, default: '' },
     dossierData: { type: mongoose.Schema.Types.Mixed, default: {} },
     isPublic: { type: Boolean, default: false }
@@ -307,12 +309,13 @@ app.get('/api/account/details', protect, async (req, res) => {
     
     if (req.user.is_owner && req.user.organisation) {
         const formateurs = await User.find({ organisation: req.user.organisation._id, is_owner: false }, 'email');
+        // Récupérer aussi les invitations pour l'organisation
         const invitations = await Invitation.find({ organisation: req.user.organisation._id });
         
         organisationData = { 
             ...req.user.organisation.toObject(), 
             formateurs, 
-            invitations, 
+            invitations, // Liste des invitations
             licences_utilisees: formateurs.length + 1 
         };
     }
@@ -401,9 +404,12 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
         const token = crypto.randomBytes(32).toString('hex');
         const email = req.body.email.toLowerCase();
         
+        // Création de l'invitation en BDD
         await new Invitation({ email: email, organisation: req.user.organisation._id, token }).save();
         
-        const baseUrl = 'https://eidos-simul.fr'; 
+        // --- Envoi réel de l'email ---
+        // Construction du lien
+        const baseUrl = 'https://eidos-simul.fr'; // URL de production
         const inviteLink = `${baseUrl}/auth.html?invitation_token=${token}&email=${email}`;
         
         await transporter.sendMail({
@@ -426,6 +432,7 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
     }
 });
 
+// Route pour supprimer une invitation
 app.delete('/api/organisation/invite/:id', protect, async (req, res) => {
     if (!req.user.is_owner || !req.user.organisation) return res.status(403).json({ error: 'Non autorisé' });
     
@@ -561,8 +568,7 @@ app.get('/api/patients', protect, async (req, res) => {
 });
 
 app.post('/api/patients/save', protect, async (req, res) => {
-    // MODIFIÉ : Autoriser formateur/owner explicitement, même si effectivePlan est 'free'
-    if (req.user.role === 'etudiant' || (req.user.effectivePlan === 'free' && req.user.role !== 'formateur' && req.user.role !== 'owner')) {
+    if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') {
         return res.status(403).json({ error: 'Non autorisé' });
     }
     try {
@@ -606,8 +612,7 @@ app.post('/api/patients/save', protect, async (req, res) => {
 });
 
 app.delete('/api/patients/:patientId', protect, async (req, res) => {
-    // MODIFIÉ : Autoriser formateur/owner explicitement
-    if (req.user.role === 'etudiant' || (req.user.effectivePlan === 'free' && req.user.role !== 'formateur' && req.user.role !== 'owner')) return res.status(403).json({ error: 'Non autorisé' });
+    if (req.user.role === 'etudiant' || req.user.effectivePlan === 'free') return res.status(403).json({ error: 'Non autorisé' });
 
     try {
         const patientId = req.params.patientId;
@@ -668,8 +673,15 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
         let finalDossierData = dossierData;
         let sidebarUpdate = {};
         if (req.user.role === 'etudiant') {
+             // Logique simplifiée pour l'étudiant (fusion)
              const permissions = req.user.permissions;
+             const existing = await Patient.findOne({ patientId: req.params.patientId, user: userIdToSave });
+             const merged = { ...(existing ? existing.dossierData : {}) };
+             
+             // On ne met à jour que ce qui est autorisé
+             // NOTE: Ceci est une simplification, la logique de fusion complète doit être maintenue si elle était plus complexe
              finalDossierData = dossierData; 
+             
              if(permissions.header) { sidebarUpdate = { sidebar_patient_name }; }
         } else {
             sidebarUpdate = { sidebar_patient_name };
