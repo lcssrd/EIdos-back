@@ -288,9 +288,18 @@ app.post('/auth/verify', async (req, res) => {
     try {
         const { email, code } = req.body;
         const user = await User.findOne({ email: email.toLowerCase() });
-        if (!user || user.confirmationCode !== code) return res.status(400).json({ error: 'Invalide' });
-        user.isVerified = true; user.confirmationCode = undefined; await user.save();
-        res.json({ success: true });
+        if (!user || user.confirmationCode !== code) return res.status(400).json({ error: 'Code invalide' });
+        
+        // Validation de l'utilisateur
+        user.isVerified = true; 
+        user.confirmationCode = undefined; 
+        await user.save();
+
+        // GÉNÉRATION DU TOKEN (Connexion automatique)
+        const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+
+        // On renvoie le token au frontend
+        res.json({ success: true, token }); 
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
