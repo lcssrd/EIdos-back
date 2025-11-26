@@ -127,7 +127,10 @@ const userSchema = new mongoose.Schema({
     allowedRooms: { type: [String], default: [] },
     newEmail: { type: String, lowercase: true, default: null },
     newEmailToken: { type: String, default: null },
-    newEmailTokenExpires: { type: Date, default: null }
+    newEmailTokenExpires: { type: Date, default: null },
+    // NOUVEAU : Champs pour la récupération de mot de passe
+    resetPasswordToken: { type: String, default: null },
+    resetPasswordExpires: { type: Date, default: null }
 });
 const User = mongoose.model('User', userSchema);
 
@@ -316,6 +319,69 @@ app.post('/auth/login', async (req, res) => {
         res.json({ success: true, token });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// --- NOUVEAU : ROUTES MOT DE PASSE OUBLIÉ ---
+
+app.post('/auth/forgot-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ error: 'Email requis' });
+        
+        const user = await User.findOne({ email: email.toLowerCase() });
+        if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+
+        // Générer un code simple à 6 chiffres
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        user.resetPasswordToken = code;
+        user.resetPasswordExpires = Date.now() + 3600000; // 1 heure
+        await user.save();
+
+        // Envoyer l'email
+        await transporter.sendMail({
+            from: `"EIdos" <${process.env.EMAIL_FROM}>`,
+            to: email,
+            subject: 'Réinitialisation de mot de passe EIdos',
+            html: `
+                <h3>Réinitialisation de mot de passe</h3>
+                <p>Vous avez demandé la réinitialisation de votre mot de passe.</p>
+                <p>Votre code de vérification est : <b>${code}</b></p>
+                <p>Ce code expire dans 1 heure.</p>
+                <p>Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.</p>
+            `
+        });
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Erreur lors de l'envoi de l'email." });
+    }
+});
+
+app.post('/auth/reset-password', async (req, res) => {
+    try {
+        const { email, code, newPassword } = req.body;
+        if (!email || !code || !newPassword) return res.status(400).json({ error: 'Tous les champs sont requis' });
+
+        const user = await User.findOne({ 
+            email: email.toLowerCase(), 
+            resetPasswordToken: code, 
+            resetPasswordExpires: { $gt: Date.now() } 
+        });
+
+        if (!user) return res.status(400).json({ error: 'Code invalide ou expiré' });
+
+        user.passwordHash = await bcrypt.hash(newPassword, 10);
+        user.resetPasswordToken = null;
+        user.resetPasswordExpires = null;
+        await user.save();
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ---------------------------------------------
 
 app.get('/api/auth/me', protect, async (req, res) => {
     res.json({ ...req.user.toObject(), effectivePlan: req.user.effectivePlan });
