@@ -6,6 +6,8 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
+const helmet = require('helmet'); // NOUVEAU : Import Helmet
+const rateLimit = require('express-rate-limit'); // NOUVEAU : Import Rate Limit
 
 // Importations pour Socket.io
 const http = require('http');
@@ -13,6 +15,9 @@ const { Server } = require("socket.io");
 
 // --- CONFIGURATION ---
 const app = express();
+
+// NOUVEAU : Sécurisation des en-têtes HTTP avec Helmet
+app.use(helmet());
 
 // Render (et d'autres load balancers) ajoute le header 'x-forwarded-proto'
 app.use((req, res, next) => {
@@ -45,7 +50,36 @@ app.use(cors({
     credentials: true // Important si vous utilisez des cookies ou headers sécurisés
 }));
 
-app.use(express.json());
+// NOUVEAU : Limitation de la taille du payload JSON à 1mb (Protection DoS)
+app.use(express.json({ limit: '1mb' }));
+
+// NOUVEAU : Configuration du Rate Limiting (Limitation de débit)
+
+// 1. Limiteur strict pour l'authentification (Login/Signup/Verify)
+// Pour éviter le brute-force sur les mots de passe ou l'envoi massif d'emails
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 20, // Limite chaque IP à 20 requêtes par fenêtre de 15 min
+    standardHeaders: true, // Retourne les infos de limite dans les headers `RateLimit-*`
+    legacyHeaders: false, // Désactive les headers `X-RateLimit-*`
+    message: { error: "Trop de tentatives de connexion, veuillez réessayer dans 15 minutes." }
+});
+
+// 2. Limiteur global pour l'API
+// Pour protéger les ressources serveur
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 300, // Limite chaque IP à 300 requêtes par fenêtre (environ 1 requête toutes les 3 sec en moyenne)
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Trop de requêtes à l'API, veuillez ralentir." }
+});
+
+// Application des limiteurs aux routes spécifiques
+// On applique le limiteur AVANT la définition des routes
+app.use('/auth', authLimiter);
+app.use('/api', apiLimiter);
+
 
 // Création du serveur HTTP et de l'instance Socket.io
 const httpServer = http.createServer(app);
@@ -160,21 +194,21 @@ const protect = async (req, res, next) => {
         if (!user) {
             return res.status(401).json({ error: 'Utilisateur non trouvé' });
         }
-        
+
         // Auto-correction du rôle pour les anciens comptes
         if (user.role === 'user' && (user.subscription === 'independant' || user.subscription === 'promo')) {
             console.log(`Auto-correction rôle pour ${user.email}: user -> formateur`);
             user.role = 'formateur';
             await user.save();
         }
-        
+
         req.user = user;
         if (user.role === 'etudiant') {
             req.user.resourceId = user.createdBy;
         } else {
             req.user.resourceId = user._id;
         }
-        
+
         if ((user.role === 'formateur' || user.role === 'owner') && user.organisation && user.organisation.is_active) {
             req.user.effectivePlan = user.organisation.plan;
         } else if (user.role === 'etudiant') {
@@ -242,7 +276,7 @@ app.post('/auth/signup', async (req, res) => {
             if (!invitation || invitation.expires_at < Date.now()) return res.status(400).json({ error: "Invitation invalide" });
             const formateurCount = await User.countDocuments({ organisation: invitation.organisation._id, role: 'formateur' });
             if (formateurCount >= invitation.organisation.licences_max) return res.status(403).json({ error: "Max atteint" });
-            
+
             const newUser = new User({ email: email.toLowerCase(), passwordHash, isVerified: true, role: 'formateur', subscription: 'promo', organisation: invitation.organisation._id, is_owner: false });
             await newUser.save();
             await Invitation.deleteOne({ _id: invitation._id });
@@ -275,7 +309,7 @@ app.post('/auth/signup', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/auth/resend-code', async (req, res) => { 
+app.post('/auth/resend-code', async (req, res) => {
     try {
         const { email } = req.body;
         const user = await User.findOne({ email: email.toLowerCase() });
@@ -285,7 +319,7 @@ app.post('/auth/resend-code', async (req, res) => {
         await user.save();
         await transporter.sendMail({ from: `"EIdos" <${process.env.EMAIL_FROM}>`, to: email, subject: 'Nouveau code', html: `Code: <b>${confirmationCode}</b>` });
         res.json({ success: true });
-    } catch(e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/auth/verify', async (req, res) => {
@@ -293,18 +327,18 @@ app.post('/auth/verify', async (req, res) => {
         const { email, code } = req.body;
         const user = await User.findOne({ email: email.toLowerCase() });
         if (!user || user.confirmationCode !== code) return res.status(400).json({ error: 'Code invalide' });
-        
+
         // Validation de l'utilisateur
-        user.isVerified = true; 
-        user.confirmationCode = undefined; 
+        user.isVerified = true;
+        user.confirmationCode = undefined;
         await user.save();
 
         // GÉNÉRATION DU TOKEN (Connexion automatique)
         const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
 
         // On renvoie le token au frontend
-        res.json({ success: true, token }); 
-    } catch(e) { res.status(500).json({ error: e.message }); }
+        res.json({ success: true, token });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/auth/login', async (req, res) => {
@@ -318,7 +352,7 @@ app.post('/auth/login', async (req, res) => {
         if ((user.role === 'user' || user.role === 'owner' || user.role === 'formateur') && !user.isVerified) return res.status(401).json({ error: 'Non vérifié' });
         const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
         res.json({ success: true, token });
-    } catch(e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- NOUVEAU : ROUTES MOT DE PASSE OUBLIÉ ---
@@ -327,7 +361,7 @@ app.post('/auth/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) return res.status(400).json({ error: 'Email requis' });
-        
+
         const user = await User.findOne({ email: email.toLowerCase() });
         if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
 
@@ -363,10 +397,10 @@ app.post('/auth/reset-password', async (req, res) => {
         const { email, code, newPassword } = req.body;
         if (!email || !code || !newPassword) return res.status(400).json({ error: 'Tous les champs sont requis' });
 
-        const user = await User.findOne({ 
-            email: email.toLowerCase(), 
-            resetPasswordToken: code, 
-            resetPasswordExpires: { $gt: Date.now() } 
+        const user = await User.findOne({
+            email: email.toLowerCase(),
+            resetPasswordToken: code,
+            resetPasswordExpires: { $gt: Date.now() }
         });
 
         if (!user) return res.status(400).json({ error: 'Code invalide ou expiré' });
@@ -391,41 +425,41 @@ app.get('/api/auth/me', protect, async (req, res) => {
 // --- ROUTES ACCOUNT ---
 app.get('/api/account/details', protect, async (req, res) => {
     if (req.user.role === 'etudiant') return res.status(403).json({ error: 'Non autorisé' });
-    
+
     const students = await User.find({ createdBy: req.user.resourceId }, 'login permissions allowedRooms');
     let organisationData = null;
-    
+
     if (req.user.is_owner && req.user.organisation) {
         const formateurs = await User.find({ organisation: req.user.organisation._id, is_owner: false }, 'email');
         const invitations = await Invitation.find({ organisation: req.user.organisation._id });
-        
-        organisationData = { 
-            ...req.user.organisation.toObject(), 
-            formateurs, 
-            invitations, 
-            licences_utilisees: formateurs.length + 1 
+
+        organisationData = {
+            ...req.user.organisation.toObject(),
+            formateurs,
+            invitations,
+            licences_utilisees: formateurs.length + 1
         };
     }
-    
-    res.json({ 
-        email: req.user.email, 
-        plan: req.user.effectivePlan, 
-        role: req.user.role, 
-        is_owner: req.user.is_owner, 
+
+    res.json({
+        email: req.user.email,
+        plan: req.user.effectivePlan,
+        role: req.user.role,
+        is_owner: req.user.is_owner,
         is_super_admin: req.user.is_super_admin,
-        students, 
-        organisation: organisationData 
+        students,
+        organisation: organisationData
     });
 });
 
-app.post('/api/account/change-password', protect, async (req, res) => { 
+app.post('/api/account/change-password', protect, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     if (!await bcrypt.compare(currentPassword, req.user.passwordHash)) return res.status(400).json({ error: 'Mot de passe incorrect' });
     req.user.passwordHash = await bcrypt.hash(newPassword, 10); await req.user.save();
     res.json({ success: true });
 });
 
-app.post('/api/account/request-change-email', protect, async (req, res) => { 
+app.post('/api/account/request-change-email', protect, async (req, res) => {
     const { newEmail, password } = req.body;
     if (!await bcrypt.compare(password, req.user.passwordHash)) return res.status(400).json({ error: 'Incorrect' });
     const token = crypto.randomBytes(32).toString('hex');
@@ -436,7 +470,7 @@ app.post('/api/account/request-change-email', protect, async (req, res) => {
     res.json({ success: true });
 });
 
-app.get('/api/account/verify-change-email', async (req, res) => { 
+app.get('/api/account/verify-change-email', async (req, res) => {
     const { token } = req.query;
     const user = await User.findOne({ newEmailToken: token, newEmailTokenExpires: { $gt: Date.now() } });
     if (!user) return res.status(400).send('Invalide');
@@ -444,7 +478,7 @@ app.get('/api/account/verify-change-email', async (req, res) => {
     res.send('Email changé.');
 });
 
-app.delete('/api/account/delete', protect, async (req, res) => { 
+app.delete('/api/account/delete', protect, async (req, res) => {
     await Patient.deleteMany({ user: req.user.resourceId });
     await User.deleteMany({ createdBy: req.user._id });
     if (req.user.is_owner && req.user.organisation) {
@@ -455,7 +489,7 @@ app.delete('/api/account/delete', protect, async (req, res) => {
     res.json({ success: true });
 });
 
-app.post('/api/account/invite', protect, async (req, res) => { 
+app.post('/api/account/invite', protect, async (req, res) => {
     const { login, password } = req.body;
     const passwordHash = await bcrypt.hash(password, 10);
     const newUser = new User({ login: login.toLowerCase(), passwordHash, role: 'etudiant', subscription: 'free', createdBy: req.user.resourceId, isVerified: true, permissions: {}, allowedRooms: [] });
@@ -463,47 +497,47 @@ app.post('/api/account/invite', protect, async (req, res) => {
     res.status(201).json({ success: true });
 });
 
-app.put('/api/account/permissions', protect, async (req, res) => { 
+app.put('/api/account/permissions', protect, async (req, res) => {
     const { login, permission, value } = req.body;
     await User.updateOne({ login: login.toLowerCase(), createdBy: req.user.resourceId }, { [`permissions.${permission}`]: value });
     res.json({ success: true });
 });
 
-app.put('/api/account/student/rooms', protect, async (req, res) => { 
+app.put('/api/account/student/rooms', protect, async (req, res) => {
     const { login, rooms } = req.body;
     await User.updateOne({ login: login.toLowerCase(), createdBy: req.user.resourceId }, { allowedRooms: rooms });
     res.json({ success: true });
 });
 
-app.delete('/api/account/student', protect, async (req, res) => { 
+app.delete('/api/account/student', protect, async (req, res) => {
     await User.deleteOne({ login: req.body.login.toLowerCase(), createdBy: req.user.resourceId });
     res.json({ success: true });
 });
 
-app.post('/api/account/change-subscription', protect, async (req, res) => { 
+app.post('/api/account/change-subscription', protect, async (req, res) => {
     const newPlan = req.body.newPlan;
     req.user.subscription = newPlan;
     req.user.organisation = null;
-    
+
     if (newPlan === 'independant' || newPlan === 'promo') {
         req.user.role = 'formateur';
     } else {
         req.user.role = 'user';
     }
-    
+
     await req.user.save();
     res.json({ success: true });
 });
 
-app.post('/api/organisation/invite', protect, async (req, res) => { 
+app.post('/api/organisation/invite', protect, async (req, res) => {
     try {
         const token = crypto.randomBytes(32).toString('hex');
         const email = req.body.email.toLowerCase();
         await new Invitation({ email: email, organisation: req.user.organisation._id, token }).save();
-        
-        const baseUrl = 'https://eidos-simul.fr'; 
+
+        const baseUrl = 'https://eidos-simul.fr';
         const inviteLink = `${baseUrl}/auth.html?invitation_token=${token}&email=${email}`;
-        
+
         await transporter.sendMail({
             from: `"EIdos" <${process.env.EMAIL_FROM}>`,
             to: email,
@@ -534,7 +568,7 @@ app.delete('/api/organisation/invite/:id', protect, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/organisation/remove', protect, async (req, res) => { 
+app.post('/api/organisation/remove', protect, async (req, res) => {
     await User.updateOne({ email: req.body.email.toLowerCase(), organisation: req.user.organisation._id }, { organisation: null, role: 'user', subscription: 'free' });
     res.json({ success: true });
 });
@@ -545,11 +579,11 @@ app.post('/api/organisation/remove', protect, async (req, res) => {
 app.get('/api/admin/structure', protect, checkAdmin, async (req, res) => {
     try {
         const organisations = await Organisation.find({}, 'name plan licences_max licences_utilisees owner');
-        const independants = await User.find({ 
-            role: { $in: ['user', 'formateur'] }, 
-            organisation: null, 
+        const independants = await User.find({
+            role: { $in: ['user', 'formateur'] },
+            organisation: null,
             is_owner: false,
-            role: { $ne: 'etudiant' } 
+            role: { $ne: 'etudiant' }
         }, 'email subscription isVerified');
 
         res.json({ organisations, independants });
@@ -599,8 +633,8 @@ app.delete('/api/admin/user/:userId', protect, checkAdmin, async (req, res) => {
 app.get('/api/admin/patients', protect, checkAdmin, async (req, res) => {
     try {
         const patients = await Patient.find({ patientId: { $regex: /^save_/ } })
-                                      .populate('user', 'email login')
-                                      .select('patientId sidebar_patient_name isPublic user');
+            .populate('user', 'email login')
+            .select('patientId sidebar_patient_name isPublic user');
         res.json(patients);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -643,7 +677,7 @@ app.get('/api/patients', protect, async (req, res) => {
         const patients = await Patient.find(
             { $or: [baseQuery, publicQuery] },
             'patientId sidebar_patient_name isPublic user'
-        ).populate('user', 'email'); 
+        ).populate('user', 'email');
 
         res.json(patients);
     } catch (err) {
@@ -671,12 +705,12 @@ app.post('/api/patients/save', protect, async (req, res) => {
             res.json({ success: true, message: 'Mise à jour OK.' });
         } else {
             const plan = req.user.effectivePlan;
-            
+
             if (plan === 'independant' || plan === 'promo') {
                 const saveCount = await Patient.countDocuments({
                     user: req.user.resourceId,
                     patientId: { $regex: /^save_/ },
-                    isPublic: false 
+                    isPublic: false
                 });
                 let limit = (plan === 'independant') ? 20 : 50;
                 if (saveCount >= limit) return res.status(403).json({ error: `Limite atteinte (${limit}).` });
@@ -688,7 +722,7 @@ app.post('/api/patients/save', protect, async (req, res) => {
                 user: req.user.resourceId,
                 dossierData: dossierData,
                 sidebar_patient_name: sidebar_patient_name,
-                isPublic: false 
+                isPublic: false
             });
             await newPatient.save();
             res.status(201).json({ success: true, message: 'Sauvegardé.' });
@@ -702,20 +736,20 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
 
     try {
         const patientId = req.params.patientId;
-        
+
         if (patientId.startsWith('chambre_')) {
             await Patient.findOneAndUpdate({ patientId: patientId, user: req.user.resourceId }, { dossierData: {}, sidebar_patient_name: `Chambre ${patientId.split('_')[1]}` }, { upsert: true });
-            try { io.to(`room_${req.user.resourceId}`).emit('patient_updated', { patientId, dossierData: {} }); } catch(e){}
+            try { io.to(`room_${req.user.resourceId}`).emit('patient_updated', { patientId, dossierData: {} }); } catch (e) { }
             res.json({ success: true });
         } else if (patientId.startsWith('save_')) {
-            
+
             const patient = await Patient.findOne({ patientId: patientId });
             if (!patient) return res.status(404).json({ error: "Introuvable" });
 
             if (patient.isPublic && req.user.is_super_admin !== true) {
                 return res.status(403).json({ error: "Impossible de supprimer un dossier Public." });
             }
-            
+
             if (patient.user.toString() !== req.user.resourceId.toString() && req.user.is_super_admin !== true) {
                 return res.status(403).json({ error: "Ce dossier ne vous appartient pas." });
             }
@@ -739,39 +773,39 @@ app.get('/api/patients/:patientId', protect, async (req, res) => {
 
         // 2. Si non trouvé et que c'est une sauvegarde, on regarde si c'est un dossier public
         if (!patient && patientId.startsWith('save_')) {
-             patient = await Patient.findOne({ patientId: patientId, isPublic: true });
+            patient = await Patient.findOne({ patientId: patientId, isPublic: true });
         }
 
         // 3. Si trouvé (soit à l'user, soit public), on le renvoie
         if (patient) {
-             // Vérification redondante mais sécurisante (au cas où le findOne changerait)
-             const belongsToUser = (patient.user.toString() === userId.toString());
-             const isPublic = patient.isPublic;
-             if (!belongsToUser && !isPublic && req.user.is_super_admin !== true) {
-                 return res.status(403).json({ error: 'Accès refusé' });
-             }
+            // Vérification redondante mais sécurisante (au cas où le findOne changerait)
+            const belongsToUser = (patient.user.toString() === userId.toString());
+            const isPublic = patient.isPublic;
+            if (!belongsToUser && !isPublic && req.user.is_super_admin !== true) {
+                return res.status(403).json({ error: 'Accès refusé' });
+            }
         }
 
         // 4. Auto-création pour les chambres si non trouvé
         if (!patient && patientId.startsWith('chambre_')) {
-            patient = new Patient({ 
-                patientId: patientId, 
-                user: userId, 
-                sidebar_patient_name: `Chambre ${patientId.split('_')[1]}` 
+            patient = new Patient({
+                patientId: patientId,
+                user: userId,
+                sidebar_patient_name: `Chambre ${patientId.split('_')[1]}`
             });
             await patient.save();
         } else if (!patient) {
             return res.status(404).json({ error: 'Dossier non trouvé' });
         }
-        
+
         res.json(patient.dossierData || {});
-    } catch(e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/patients/:patientId', protect, async (req, res) => {
     try {
         if (!req.params.patientId.startsWith('chambre_')) return res.status(400).json({ error: 'Chambres uniquement' });
-        
+
         if (req.user.role === 'user') {
             return res.status(403).json({ error: "Modification interdite pour le plan gratuit." });
         }
@@ -781,27 +815,27 @@ app.post('/api/patients/:patientId', protect, async (req, res) => {
         let finalDossierData = dossierData;
         let sidebarUpdate = {};
         if (req.user.role === 'etudiant') {
-             const permissions = req.user.permissions;
-             const existing = await Patient.findOne({ patientId: req.params.patientId, user: userIdToSave });
-             const merged = { ...(existing ? existing.dossierData : {}) };
-             finalDossierData = dossierData; 
-             if(permissions.header) { sidebarUpdate = { sidebar_patient_name }; }
+            const permissions = req.user.permissions;
+            const existing = await Patient.findOne({ patientId: req.params.patientId, user: userIdToSave });
+            const merged = { ...(existing ? existing.dossierData : {}) };
+            finalDossierData = dossierData;
+            if (permissions.header) { sidebarUpdate = { sidebar_patient_name }; }
         } else {
             sidebarUpdate = { sidebar_patient_name };
         }
-        
+
         await Patient.findOneAndUpdate({ patientId: req.params.patientId, user: userIdToSave }, { dossierData: finalDossierData, ...sidebarUpdate, user: userIdToSave }, { upsert: true, new: true });
-        
+
         try {
             const sId = req.headers['x-socket-id'];
             const room = `room_${userIdToSave}`;
             const socks = await io.in(room).fetchSockets();
             const sender = socks.find(s => s.id === sId);
-            if(sender) sender.to(room).emit('patient_updated', { patientId: req.params.patientId, dossierData: finalDossierData, sender: sId });
+            if (sender) sender.to(room).emit('patient_updated', { patientId: req.params.patientId, dossierData: finalDossierData, sender: sId });
             else io.to(room).emit('patient_updated', { patientId: req.params.patientId, dossierData: finalDossierData, sender: sId });
-        } catch(e){}
+        } catch (e) { }
         res.json({ success: true });
-    } catch(e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/webhook/payment-received', express.raw({ type: 'application/json' }), async (req, res) => { res.json({ received: true }); });
