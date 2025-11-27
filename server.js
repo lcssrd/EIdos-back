@@ -29,6 +29,7 @@ const allowedOrigins = [
     'https://eidos-simul.fr',       // Votre production OVH
     'https://www.eidos-simul.fr',   // Variante www
     'https://eidos-app.vercel.app',   // Variante site
+    'https://eidos-simul.pages.dev', // Variante Pages
 ];
 
 // Configuration CORS pour Express (API REST)
