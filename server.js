@@ -18,8 +18,7 @@ const { Server } = require("socket.io");
 // --- CONFIGURATION ---
 const app = express();
 
-// [CORRECTION RENDER] Faire confiance au premier proxy (Load Balancer de Render)
-// Cela permet à express-rate-limit de lire correctement l'IP du client via X-Forwarded-For
+// [CORRECTION RENDER] Faire confiance au premier proxy
 app.set('trust proxy', 1); 
 
 // Sécurisation des en-têtes HTTP
@@ -40,8 +39,8 @@ const allowedOrigins = [
     'https://eidos-app.vercel.app',
     'https://eidos-simul.pages.dev',
     'https://eidos-simul.onrender.com',
-    'http://localhost:5500', // Pour le dev local
-    'http://127.0.0.1:5500'  // Pour le dev local
+    'http://localhost:5500', 
+    'http://127.0.0.1:5500'
 ];
 
 // Configuration CORS (Strict pour les Cookies)
@@ -56,13 +55,11 @@ app.use(cors({
     credentials: true
 }));
 
-// Payload limit
-app.use(express.json({ limit: '1mb' }));
-// Parsing des cookies
+// Payload limit réduit pour sécurité (DoS) [AUDIT]
+app.use(express.json({ limit: '200kb' })); 
 app.use(cookieParser());
 
 // --- RATE LIMITING ---
-// (Le reste du fichier reste identique, mais maintenant le rate limiter fonctionnera)
 const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 20, 
@@ -74,8 +71,8 @@ const authLimiter = rateLimit({
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 300, 
-    standardHeaders: true,
-    legacyHeaders: false,
+    standardHeaders: true, 
+    legacyHeaders: false, 
     message: { error: "Trop de requêtes à l'API, veuillez ralentir." }
 });
 
@@ -108,29 +105,46 @@ const transporter = nodemailer.createTransport({
     }
 });
 
-// --- SCHÉMAS DE VALIDATION ZOD ---
+// --- SCHÉMAS DE VALIDATION ZOD [AUDIT: DURCISSEMENT] ---
 
 const loginSchema = z.object({
-    identifier: z.string().min(1, "Identifiant requis"),
-    password: z.string().min(1, "Mot de passe requis")
+    identifier: z.string().min(1, "Identifiant requis").max(100),
+    password: z.string().min(1, "Mot de passe requis").max(100)
 });
 
 const signupSchema = z.object({
-    email: z.string().email("Email invalide"),
-    password: z.string().min(6, "Le mot de passe doit faire 6 caractères min."),
+    email: z.string().email("Email invalide").max(150),
+    password: z.string().min(6, "Le mot de passe doit faire 6 caractères min.").max(100),
     plan: z.enum(['free', 'independant', 'promo', 'centre']).optional(),
-    token: z.string().optional()
+    token: z.string().max(200).optional()
 });
 
 const verifySchema = z.object({
-    email: z.string().email(),
-    code: z.string().min(1)
+    email: z.string().email().max(150),
+    code: z.string().min(1).max(20)
 });
 
-// Validation simplifiée pour sauvegarder un patient
+// Schéma Dossier Patient durci pour éviter l'injection de données massives
+const dossierItemSchema = z.object({
+    author: z.string().max(100).optional(),
+    text: z.string().max(20000).optional(), // Limite raisonnable pour du texte riche
+    dateOffset: z.number().optional(),
+    date: z.string().max(50).optional()
+}).catchall(z.any()); // Autorise d'autres champs mineurs mais valide les principaux
+
 const patientSaveSchema = z.object({
     sidebar_patient_name: z.string().min(1, "Nom du patient requis").max(100),
-    dossierData: z.record(z.any())
+    dossierData: z.object({
+        observations: z.array(dossierItemSchema).optional(),
+        transmissions: z.array(dossierItemSchema).optional(),
+        prescriptions: z.array(z.any()).optional(), // Structure complexe, on garde any mais contrôlé par la taille du payload
+        biologie: z.any().optional(),
+        pancarte: z.any().optional(),
+        glycemie: z.any().optional(),
+        careDiagramRows: z.array(z.object({ name: z.string().max(200) })).optional(),
+        careDiagramCheckboxes: z.array(z.boolean()).optional(),
+        comptesRendus: z.record(z.string().max(50000)).optional(), // Limite taille CR
+    }).catchall(z.any()) // Flexibilité pour les champs futurs
 });
 
 // Middleware de validation générique
@@ -144,6 +158,15 @@ const validate = (schema) => (req, res, next) => {
             details: err.errors.map(e => e.message).join(', ') 
         });
     }
+};
+
+// Helper pour gestion d'erreur sécurisée [AUDIT]
+const safeError = (res, err, status = 500) => {
+    console.error(err); // Log serveur complet
+    const message = process.env.NODE_ENV === 'production' 
+        ? "Une erreur interne est survenue." 
+        : err.message;
+    res.status(status).json({ error: message });
 };
 
 // --- HELPER COOKIE ---
@@ -327,7 +350,7 @@ app.post('/auth/login', validate(loginSchema), async (req, res) => {
         if ((user.role === 'user' || user.role === 'owner' || user.role === 'formateur') && !user.isVerified) return res.status(401).json({ error: 'Non vérifié' });
         
         sendTokenResponse(user, 200, res);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { safeError(res, e); }
 });
 
 app.post('/auth/signup', validate(signupSchema), async (req, res) => {
@@ -336,7 +359,9 @@ app.post('/auth/signup', validate(signupSchema), async (req, res) => {
         const existingUser = await User.findOne({ email: email.toLowerCase() });
         if (existingUser) return res.status(400).json({ error: 'Email pris' });
         const passwordHash = await bcrypt.hash(password, 10);
-        const confirmationCode = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // [AUDIT] Code sécurisé
+        const confirmationCode = crypto.randomInt(100000, 1000000).toString();
 
         if (token) {
             const invitation = await Invitation.findOne({ token: token, email: email.toLowerCase() }).populate('organisation');
@@ -372,7 +397,7 @@ app.post('/auth/signup', validate(signupSchema), async (req, res) => {
             } catch (e) { console.error(e); }
             return res.status(201).json({ success: true, verified: false });
         }
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { safeError(res, err); }
 });
 
 app.post('/auth/verify', validate(verifySchema), async (req, res) => {
@@ -386,7 +411,7 @@ app.post('/auth/verify', validate(verifySchema), async (req, res) => {
         await user.save();
 
         sendTokenResponse(user, 200, res);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { safeError(res, e); }
 });
 
 app.post('/auth/resend-code', async (req, res) => {
@@ -394,12 +419,15 @@ app.post('/auth/resend-code', async (req, res) => {
         const { email } = req.body;
         const user = await User.findOne({ email: email.toLowerCase() });
         if (!user) return res.status(404).json({ error: 'User not found' });
-        const confirmationCode = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // [AUDIT] Code sécurisé
+        const confirmationCode = crypto.randomInt(100000, 1000000).toString();
+        
         user.confirmationCode = confirmationCode;
         await user.save();
         await transporter.sendMail({ from: `"EIdos-simul" <${process.env.EMAIL_FROM}>`, to: email, subject: 'Nouveau code', html: `Code: <b>${confirmationCode}</b>` });
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { safeError(res, e); }
 });
 
 app.post('/auth/logout', (req, res) => {
@@ -418,7 +446,10 @@ app.post('/auth/forgot-password', async (req, res) => {
         if (!email) return res.status(400).json({ error: 'Email requis' });
         const user = await User.findOne({ email: email.toLowerCase() });
         if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
-        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // [AUDIT] Code sécurisé
+        const code = crypto.randomInt(100000, 1000000).toString();
+        
         user.resetPasswordToken = code;
         user.resetPasswordExpires = Date.now() + 3600000;
         await user.save();
@@ -429,7 +460,7 @@ app.post('/auth/forgot-password', async (req, res) => {
             html: `Code: <b>${code}</b>`
         });
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: "Erreur envoi email." }); }
+    } catch (err) { safeError(res, err); }
 });
 
 app.post('/auth/reset-password', async (req, res) => {
@@ -447,7 +478,7 @@ app.post('/auth/reset-password', async (req, res) => {
         user.resetPasswordExpires = null;
         await user.save();
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { safeError(res, err); }
 });
 
 // Routes protégées
@@ -520,7 +551,7 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
         const inviteLink = `${baseUrl}/auth.html?invitation_token=${token}&email=${email}`;
         await transporter.sendMail({ from: `"EIdos-simul" <${process.env.EMAIL_FROM}>`, to: email, subject: 'Invitation à rejoindre EIdos-simul', html: `<a href="${inviteLink}">Accepter l'invitation</a>` });
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: "Erreur envoi." }); }
+    } catch (err) { safeError(res, err); }
 });
 
 app.delete('/api/organisation/invite/:id', protect, async (req, res) => {
@@ -528,7 +559,7 @@ app.delete('/api/organisation/invite/:id', protect, async (req, res) => {
     try {
         await Invitation.deleteOne({ _id: req.params.id, organisation: req.user.organisation._id });
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { safeError(res, err); }
 });
 
 app.post('/api/organisation/remove', protect, async (req, res) => {
@@ -584,7 +615,7 @@ app.get('/api/patients', protect, async (req, res) => {
         const publicQuery = { isPublic: true, patientId: { $regex: /^save_/ } };
         const patients = await Patient.find({ $or: [baseQuery, publicQuery] }, 'patientId sidebar_patient_name isPublic user').populate('user', 'email');
         res.json(patients);
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { safeError(res, err); }
 });
 
 app.post('/api/patients/save', protect, validate(patientSaveSchema), async (req, res) => {
@@ -608,7 +639,7 @@ app.post('/api/patients/save', protect, validate(patientSaveSchema), async (req,
             await newPatient.save();
             res.status(201).json({ success: true, message: 'Sauvegardé.' });
         }
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { safeError(res, err); }
 });
 
 app.delete('/api/patients/:patientId', protect, async (req, res) => {
@@ -629,7 +660,7 @@ app.delete('/api/patients/:patientId', protect, async (req, res) => {
         } else {
             res.status(400).json({ error: 'ID invalide' });
         }
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { safeError(res, err); }
 });
 
 app.get('/api/patients/:patientId', protect, async (req, res) => {
@@ -651,7 +682,7 @@ app.get('/api/patients/:patientId', protect, async (req, res) => {
             return res.status(404).json({ error: 'Dossier non trouvé' });
         }
         res.json(patient.dossierData || {});
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { safeError(res, e); }
 });
 
 app.post('/api/patients/:patientId', protect, validate(patientSaveSchema), async (req, res) => {
@@ -683,7 +714,7 @@ app.post('/api/patients/:patientId', protect, validate(patientSaveSchema), async
             else io.to(room).emit('patient_updated', { patientId: req.params.patientId, dossierData: finalDossierData, sender: sId });
         } catch (e) { }
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { safeError(res, e); }
 });
 
 app.post('/api/webhook/payment-received', express.raw({ type: 'application/json' }), async (req, res) => { res.json({ received: true }); });
