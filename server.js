@@ -302,7 +302,7 @@ app.post('/auth/signup', async (req, res) => {
                 await newUser.save();
             }
             try {
-                await transporter.sendMail({ from: `"EIdos" <${process.env.EMAIL_FROM}>`, to: email, subject: 'Vérification EIdos', html: `Code: <b>${confirmationCode}</b>` });
+                await transporter.sendMail({ from: `"EIdos-simul" <${process.env.EMAIL_FROM}>`, to: email, subject: 'Vérification EIdos-simul', html: `Code: <b>${confirmationCode}</b>` });
             } catch (e) { console.error(e); }
             return res.status(201).json({ success: true, verified: false });
         }
@@ -317,7 +317,7 @@ app.post('/auth/resend-code', async (req, res) => {
         const confirmationCode = Math.floor(100000 + Math.random() * 900000).toString();
         user.confirmationCode = confirmationCode;
         await user.save();
-        await transporter.sendMail({ from: `"EIdos" <${process.env.EMAIL_FROM}>`, to: email, subject: 'Nouveau code', html: `Code: <b>${confirmationCode}</b>` });
+        await transporter.sendMail({ from: `"EIdos-simul" <${process.env.EMAIL_FROM}>`, to: email, subject: 'Nouveau code', html: `Code: <b>${confirmationCode}</b>` });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -373,9 +373,9 @@ app.post('/auth/forgot-password', async (req, res) => {
 
         // Envoyer l'email
         await transporter.sendMail({
-            from: `"EIdos" <${process.env.EMAIL_FROM}>`,
+            from: `"EIdos-simul" <${process.env.EMAIL_FROM}>`,
             to: email,
-            subject: 'Réinitialisation de mot de passe EIdos',
+            subject: 'Réinitialisation de mot de passe EIdos-simul',
             html: `
                 <h3>Réinitialisation de mot de passe</h3>
                 <p>Vous avez demandé la réinitialisation de votre mot de passe.</p>
@@ -466,7 +466,7 @@ app.post('/api/account/request-change-email', protect, async (req, res) => {
     req.user.newEmail = newEmail.toLowerCase(); req.user.newEmailToken = token; req.user.newEmailTokenExpires = Date.now() + 3600000;
     await req.user.save();
     const verifyLink = `${req.protocol}://${req.get('host')}/api/account/verify-change-email?token=${token}`;
-    await transporter.sendMail({ from: `"EIdos" <${process.env.EMAIL_FROM}>`, to: newEmail, subject: 'Confirmer email', html: `<a href="${verifyLink}">Confirmer</a>` });
+    await transporter.sendMail({ from: `"EIdos-simul" <${process.env.EMAIL_FROM}>`, to: newEmail, subject: 'Confirmer email', html: `<a href="${verifyLink}">Confirmer</a>` });
     res.json({ success: true });
 });
 
@@ -539,12 +539,12 @@ app.post('/api/organisation/invite', protect, async (req, res) => {
         const inviteLink = `${baseUrl}/auth.html?invitation_token=${token}&email=${email}`;
 
         await transporter.sendMail({
-            from: `"EIdos" <${process.env.EMAIL_FROM}>`,
+            from: `"EIdos-simul" <${process.env.EMAIL_FROM}>`,
             to: email,
-            subject: 'Invitation à rejoindre EIdos',
+            subject: 'Invitation à rejoindre EIdos-simul',
             html: `
                 <h3>Bonjour,</h3>
-                <p>Vous avez été invité à rejoindre un centre de formation sur EIdos.</p>
+                <p>Vous avez été invité à rejoindre un centre de formation sur EIdos-simul.</p>
                 <p>Pour accepter l'invitation et finaliser votre inscription, cliquez sur le lien ci-dessous :</p>
                 <p><a href="${inviteLink}">Accepter l'invitation</a></p>
                 <p>Ce lien est valable 7 jours.</p>
