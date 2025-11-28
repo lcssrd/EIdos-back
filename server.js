@@ -8,8 +8,8 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const cookieParser = require('cookie-parser'); // [NOUVEAU]
-const { z } = require('zod'); // [NOUVEAU]
+const cookieParser = require('cookie-parser');
+const { z } = require('zod');
 
 // Importations pour Socket.io
 const http = require('http');
@@ -17,6 +17,10 @@ const { Server } = require("socket.io");
 
 // --- CONFIGURATION ---
 const app = express();
+
+// [CORRECTION RENDER] Faire confiance au premier proxy (Load Balancer de Render)
+// Cela permet à express-rate-limit de lire correctement l'IP du client via X-Forwarded-For
+app.set('trust proxy', 1); 
 
 // Sécurisation des en-têtes HTTP
 app.use(helmet());
@@ -49,15 +53,16 @@ app.use(cors({
             callback(new Error('Non autorisé par CORS'));
         }
     },
-    credentials: true // [IMPORTANT] Requis pour les cookies HttpOnly
+    credentials: true
 }));
 
 // Payload limit
 app.use(express.json({ limit: '1mb' }));
-// [NOUVEAU] Parsing des cookies
+// Parsing des cookies
 app.use(cookieParser());
 
 // --- RATE LIMITING ---
+// (Le reste du fichier reste identique, mais maintenant le rate limiter fonctionnera)
 const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 20, 
@@ -83,7 +88,7 @@ const io = new Server(httpServer, {
     cors: {
         origin: allowedOrigins,
         methods: ["GET", "POST"],
-        credentials: true // [IMPORTANT]
+        credentials: true
     }
 });
 
@@ -103,7 +108,7 @@ const transporter = nodemailer.createTransport({
     }
 });
 
-// --- SCHÉMAS DE VALIDATION ZOD [NOUVEAU] ---
+// --- SCHÉMAS DE VALIDATION ZOD ---
 
 const loginSchema = z.object({
     identifier: z.string().min(1, "Identifiant requis"),
@@ -122,10 +127,10 @@ const verifySchema = z.object({
     code: z.string().min(1)
 });
 
-// Validation simplifiée pour sauvegarder un patient (peut être enrichie)
+// Validation simplifiée pour sauvegarder un patient
 const patientSaveSchema = z.object({
     sidebar_patient_name: z.string().min(1, "Nom du patient requis").max(100),
-    dossierData: z.record(z.any()) // Accepte un objet JSON générique
+    dossierData: z.record(z.any())
 });
 
 // Middleware de validation générique
@@ -141,7 +146,7 @@ const validate = (schema) => (req, res, next) => {
     }
 };
 
-// --- HELPER COOKIE [NOUVEAU] ---
+// --- HELPER COOKIE ---
 const sendTokenResponse = (user, statusCode, res) => {
     const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
 
@@ -149,7 +154,7 @@ const sendTokenResponse = (user, statusCode, res) => {
         expires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 jours
         httpOnly: true, // Invisible côté client (Protection XSS)
         secure: process.env.NODE_ENV === 'production', // HTTPS en prod
-        sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax', // Cross-site en prod (Vercel -> Render)
+        sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax', // Cross-site en prod
     };
 
     res.status(statusCode)
@@ -211,14 +216,13 @@ const Patient = mongoose.model('Patient', patientSchema);
 
 // --- MIDDLEWARES ---
 
-// [MODIFIÉ] Lecture du Cookie HttpOnly
+// Lecture du Cookie HttpOnly
 const protect = async (req, res, next) => {
     let token;
 
     if (req.cookies && req.cookies.jwt) {
         token = req.cookies.jwt;
     } 
-    // Fallback headers (optionnel)
     else if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
         token = req.headers.authorization.split(' ')[1];
     }
@@ -311,7 +315,6 @@ io.on('connection', (socket) => {
 
 // --- ROUTES API ---
 
-// [MODIFIÉ] Login avec Validation + Cookie
 app.post('/auth/login', validate(loginSchema), async (req, res) => {
     try {
         const { identifier, password } = req.body;
@@ -327,7 +330,6 @@ app.post('/auth/login', validate(loginSchema), async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// [MODIFIÉ] Signup avec Validation
 app.post('/auth/signup', validate(signupSchema), async (req, res) => {
     try {
         const { email, password, plan, token } = req.body;
@@ -373,7 +375,6 @@ app.post('/auth/signup', validate(signupSchema), async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// [MODIFIÉ] Verify avec Validation + Cookie
 app.post('/auth/verify', validate(verifySchema), async (req, res) => {
     try {
         const { email, code } = req.body;
@@ -401,7 +402,6 @@ app.post('/auth/resend-code', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// [NOUVEAU] Route de déconnexion (Nettoie le cookie)
 app.post('/auth/logout', (req, res) => {
     res.cookie('jwt', 'loggedout', {
         expires: new Date(Date.now() + 10 * 1000),
@@ -412,7 +412,6 @@ app.post('/auth/logout', (req, res) => {
     res.status(200).json({ success: true });
 });
 
-// ... Routes Password Reset inchangées (elles utilisent le mail) ...
 app.post('/auth/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
@@ -456,11 +455,7 @@ app.get('/api/auth/me', protect, async (req, res) => {
     res.json({ ...req.user.toObject(), effectivePlan: req.user.effectivePlan });
 });
 
-// ... Routes Account (détails, change password, delete, invite...) inchangées SAUF protection ...
-// Toutes les routes /api/... utilisent 'protect' qui lit maintenant le cookie
-
 app.get('/api/account/details', protect, async (req, res) => {
-    // ... logique existante inchangée ...
     if (req.user.role === 'etudiant') return res.status(403).json({ error: 'Non autorisé' });
     const students = await User.find({ createdBy: req.user.resourceId }, 'login permissions allowedRooms');
     let organisationData = null;
@@ -487,12 +482,10 @@ app.delete('/api/account/delete', protect, async (req, res) => {
         await Organisation.deleteOne({ _id: req.user.organisation._id });
     }
     await User.deleteOne({ _id: req.user._id });
-    // On nettoie le cookie aussi
     res.cookie('jwt', 'loggedout', { expires: new Date(Date.now() + 10 * 1000), httpOnly: true });
     res.json({ success: true });
 });
 
-// ... Routes Invite/Student inchangées (elles utilisent protect) ...
 app.post('/api/account/invite', protect, async (req, res) => {
     const { login, password } = req.body;
     const passwordHash = await bcrypt.hash(password, 10);
@@ -518,7 +511,6 @@ app.delete('/api/account/student', protect, async (req, res) => {
     res.json({ success: true });
 });
 
-// ... Routes Organisation inchangées ...
 app.post('/api/organisation/invite', protect, async (req, res) => {
     try {
         const token = crypto.randomBytes(32).toString('hex');
@@ -544,7 +536,6 @@ app.post('/api/organisation/remove', protect, async (req, res) => {
     res.json({ success: true });
 });
 
-// ... Routes Admin inchangées ...
 app.get('/api/admin/structure', protect, checkAdmin, async (req, res) => {
     const organisations = await Organisation.find({}, 'name plan licences_max licences_utilisees owner');
     const independants = await User.find({ role: { $in: ['user', 'formateur'] }, organisation: null, is_owner: false, role: { $ne: 'etudiant' } }, 'email subscription isVerified');
@@ -586,8 +577,6 @@ app.delete('/api/admin/patients/:id', protect, checkAdmin, async (req, res) => {
     res.json({ success: true });
 });
 
-// --- ROUTES PATIENTS (AVEC VALIDATION ZOD) ---
-
 app.get('/api/patients', protect, async (req, res) => {
     try {
         const baseQuery = { user: req.user.resourceId };
@@ -598,13 +587,10 @@ app.get('/api/patients', protect, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// [MODIFIÉ] Sauvegarde avec Validation Zod
 app.post('/api/patients/save', protect, validate(patientSaveSchema), async (req, res) => {
     if (req.user.role === 'etudiant' || req.user.role === 'user') return res.status(403).json({ error: 'Non autorisé' });
     try {
         const { dossierData, sidebar_patient_name } = req.body;
-        // La validation Zod a déjà vérifié que ces champs existent et sont valides
-
         const existingSave = await Patient.findOne({ user: req.user.resourceId, sidebar_patient_name: sidebar_patient_name, patientId: { $regex: /^save_/ } });
 
         if (existingSave) {
@@ -668,7 +654,6 @@ app.get('/api/patients/:patientId', protect, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// [MODIFIÉ] Update Chambre avec Validation Zod
 app.post('/api/patients/:patientId', protect, validate(patientSaveSchema), async (req, res) => {
     try {
         if (!req.params.patientId.startsWith('chambre_')) return res.status(400).json({ error: 'Chambres uniquement' });
@@ -681,9 +666,6 @@ app.post('/api/patients/:patientId', protect, validate(patientSaveSchema), async
 
         if (req.user.role === 'etudiant') {
             const permissions = req.user.permissions;
-            const existing = await Patient.findOne({ patientId: req.params.patientId, user: userIdToSave });
-            // Note: Une logique plus fine de fusion (merge) des données selon les permissions serait idéale ici
-            // Pour l'instant on fait confiance au frontend (qui filtre l'UI) + validation basique
             finalDossierData = dossierData; 
             if (permissions.header) { sidebarUpdate = { sidebar_patient_name }; }
         } else {
