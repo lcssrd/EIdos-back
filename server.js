@@ -35,6 +35,7 @@ const allowedOrigins = [
     'https://www.eidos-simul.fr',   // Variante www
     'https://eidos-app.vercel.app',   // Variante site
     'https://eidos-simul.pages.dev', // Variante Pages
+    'https://eidos-simul.onrender.com', // Variante Render
 ];
 
 // Configuration CORS pour Express (API REST)
